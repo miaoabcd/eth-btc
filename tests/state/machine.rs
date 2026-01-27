@@ -4,7 +4,7 @@ use rust_decimal_macros::dec;
 use eth_btc_strategy::config::RiskConfig;
 use eth_btc_strategy::core::{ExitReason, TradeDirection};
 use eth_btc_strategy::state::{
-    PositionLeg, PositionSnapshot, StateError, StateMachine, StrategyStatus,
+    PositionLeg, PositionSnapshot, StateError, StateMachine, StrategyState, StrategyStatus,
 };
 
 fn sample_position(timestamp: i64) -> PositionSnapshot {
@@ -72,4 +72,22 @@ fn state_machine_time_stop_returns_to_flat() {
     machine.exit(ExitReason::TimeStop, exit_time).unwrap();
 
     assert_eq!(machine.state().status, StrategyStatus::Flat);
+}
+
+#[test]
+fn state_machine_hydrate_restores_state() {
+    let config = RiskConfig::default();
+    let mut machine = StateMachine::new(config);
+
+    let position = sample_position(100);
+    let state = StrategyState {
+        status: StrategyStatus::InPosition,
+        position: Some(position.clone()),
+        cooldown_until: None,
+    };
+
+    machine.hydrate(state).unwrap();
+
+    assert_eq!(machine.state().status, StrategyStatus::InPosition);
+    assert_eq!(machine.state().position, Some(position));
 }

@@ -4,13 +4,16 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use rust_decimal::Decimal;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use thiserror::Error;
 use tokio::time::sleep;
 
 use crate::config::{OrderType, Symbol};
 use crate::state::PositionSnapshot;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum OrderSide {
     Buy,
     Sell,
@@ -33,6 +36,17 @@ pub struct OrderRequest {
     pub qty: Decimal,
     pub order_type: OrderType,
     pub limit_price: Option<Decimal>,
+}
+
+#[derive(Debug, Clone)]
+pub struct OrderHttpResponse {
+    pub status: u16,
+    pub body: String,
+}
+
+#[async_trait::async_trait]
+pub trait OrderHttpClient: Send + Sync {
+    async fn post(&self, url: &str, body: Value) -> Result<OrderHttpResponse, ExecutionError>;
 }
 
 #[derive(Debug, Error, Clone, PartialEq)]
@@ -70,6 +84,127 @@ impl RetryConfig {
 pub trait OrderExecutor: Send + Sync {
     async fn submit(&self, order: &OrderRequest) -> Result<Decimal, ExecutionError>;
     async fn close(&self, order: &OrderRequest) -> Result<Decimal, ExecutionError>;
+}
+
+#[derive(Clone)]
+pub struct ReqwestOrderClient {
+    client: reqwest::Client,
+    api_key: Option<String>,
+}
+
+impl ReqwestOrderClient {
+    pub fn new(api_key: Option<String>) -> Self {
+        Self {
+            client: reqwest::Client::new(),
+            api_key,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl OrderHttpClient for ReqwestOrderClient {
+    async fn post(&self, url: &str, body: Value) -> Result<OrderHttpResponse, ExecutionError> {
+        let mut request = self.client.post(url).json(&body);
+        if let Some(api_key) = &self.api_key {
+            request = request.bearer_auth(api_key);
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|err| ExecutionError::Transient(err.to_string()))?;
+        let status = response.status().as_u16();
+        let body = response
+            .text()
+            .await
+            .map_err(|err| ExecutionError::Transient(err.to_string()))?;
+        Ok(OrderHttpResponse { status, body })
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct LiveOrderPayload {
+    symbol: Symbol,
+    side: OrderSide,
+    qty: Decimal,
+    order_type: OrderType,
+    limit_price: Option<Decimal>,
+    reduce_only: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct LiveOrderResponse {
+    filled_qty: Decimal,
+}
+
+#[derive(Clone)]
+pub struct LiveOrderExecutor {
+    base_url: String,
+    client: Arc<dyn OrderHttpClient>,
+}
+
+impl LiveOrderExecutor {
+    pub fn new(base_url: impl Into<String>) -> Self {
+        Self::with_client(base_url, Arc::new(ReqwestOrderClient::new(None)))
+    }
+
+    pub fn with_api_key(base_url: impl Into<String>, api_key: String) -> Self {
+        Self::with_client(base_url, Arc::new(ReqwestOrderClient::new(Some(api_key))))
+    }
+
+    pub fn with_client(base_url: impl Into<String>, client: Arc<dyn OrderHttpClient>) -> Self {
+        Self {
+            base_url: base_url.into(),
+            client,
+        }
+    }
+
+    fn order_url(&self) -> String {
+        format!("{}/v1/orders", self.base_url.trim_end_matches('/'))
+    }
+
+    async fn post_order(
+        &self,
+        order: &OrderRequest,
+        reduce_only: bool,
+    ) -> Result<Decimal, ExecutionError> {
+        let payload = LiveOrderPayload {
+            symbol: order.symbol,
+            side: order.side,
+            qty: order.qty,
+            order_type: order.order_type,
+            limit_price: order.limit_price,
+            reduce_only,
+        };
+        let body =
+            serde_json::to_value(payload).map_err(|err| ExecutionError::Fatal(err.to_string()))?;
+        let response = self.client.post(&self.order_url(), body).await?;
+        if response.status >= 500 {
+            return Err(ExecutionError::Transient(format!(
+                "server error {status}",
+                status = response.status
+            )));
+        }
+        if response.status >= 400 {
+            return Err(ExecutionError::Fatal(format!(
+                "client error {status}",
+                status = response.status
+            )));
+        }
+        let parsed: LiveOrderResponse = serde_json::from_str(&response.body)
+            .map_err(|err| ExecutionError::Fatal(err.to_string()))?;
+        Ok(parsed.filled_qty)
+    }
+}
+
+#[async_trait::async_trait]
+impl OrderExecutor for LiveOrderExecutor {
+    async fn submit(&self, order: &OrderRequest) -> Result<Decimal, ExecutionError> {
+        self.post_order(order, false).await
+    }
+
+    async fn close(&self, order: &OrderRequest) -> Result<Decimal, ExecutionError> {
+        self.post_order(order, true).await
+    }
 }
 
 #[derive(Clone)]
@@ -239,5 +374,19 @@ impl OrderExecutor for MockOrderExecutor {
 
     async fn close(&self, order: &OrderRequest) -> Result<Decimal, ExecutionError> {
         Self::pop_response(&self.close_responses, order.symbol)
+    }
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct PaperOrderExecutor;
+
+#[async_trait::async_trait]
+impl OrderExecutor for PaperOrderExecutor {
+    async fn submit(&self, order: &OrderRequest) -> Result<Decimal, ExecutionError> {
+        Ok(order.qty)
+    }
+
+    async fn close(&self, order: &OrderRequest) -> Result<Decimal, ExecutionError> {
+        Ok(order.qty)
     }
 }

@@ -1,6 +1,7 @@
 #![allow(unused_crate_dependencies)]
 
 pub mod backtest;
+pub mod cli;
 pub mod config;
 pub mod core;
 pub mod data;
@@ -10,5 +11,6 @@ pub mod indicators;
 pub mod integration;
 pub mod logging;
 pub mod position;
+pub mod runtime;
 pub mod signals;
 pub mod state;

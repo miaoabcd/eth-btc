@@ -156,6 +156,53 @@ impl FundingSource for MockFundingSource {
 }
 
 #[derive(Debug, Clone)]
+pub struct ZeroFundingSource {
+    interval_hours: u32,
+}
+
+impl Default for ZeroFundingSource {
+    fn default() -> Self {
+        Self { interval_hours: 8 }
+    }
+}
+
+impl ZeroFundingSource {
+    pub fn new(interval_hours: u32) -> Self {
+        Self { interval_hours }
+    }
+}
+
+#[async_trait::async_trait]
+impl FundingSource for ZeroFundingSource {
+    async fn fetch_rate(
+        &self,
+        symbol: Symbol,
+        timestamp: DateTime<Utc>,
+    ) -> Result<FundingRate, FundingError> {
+        let interval = if self.interval_hours == 0 {
+            8
+        } else {
+            self.interval_hours
+        };
+        Ok(FundingRate {
+            symbol,
+            rate: Decimal::ZERO,
+            timestamp,
+            interval_hours: interval,
+        })
+    }
+
+    async fn fetch_history(
+        &self,
+        _symbol: Symbol,
+        _start: DateTime<Utc>,
+        _end: DateTime<Utc>,
+    ) -> Result<Vec<FundingRate>, FundingError> {
+        Ok(Vec::new())
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct FundingHistory {
     capacity: usize,
     entries: HashMap<Symbol, VecDeque<FundingRate>>,

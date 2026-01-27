@@ -89,6 +89,34 @@ impl StateMachine {
         &self.state
     }
 
+    pub fn hydrate(&mut self, state: StrategyState) -> Result<(), StateError> {
+        match state.status {
+            StrategyStatus::Flat => {
+                if state.position.is_some() {
+                    return Err(StateError::InvalidTransition(
+                        "flat state cannot contain position".to_string(),
+                    ));
+                }
+            }
+            StrategyStatus::InPosition => {
+                if state.position.is_none() {
+                    return Err(StateError::InvalidTransition(
+                        "in-position state missing position".to_string(),
+                    ));
+                }
+            }
+            StrategyStatus::Cooldown => {
+                if state.cooldown_until.is_none() {
+                    return Err(StateError::InvalidTransition(
+                        "cooldown state missing cooldown_until".to_string(),
+                    ));
+                }
+            }
+        }
+        self.state = state;
+        Ok(())
+    }
+
     pub fn enter(
         &mut self,
         position: PositionSnapshot,

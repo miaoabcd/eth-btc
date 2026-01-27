@@ -4,6 +4,7 @@ use std::path::Path;
 
 use chrono::{DateTime, Datelike, Utc};
 use rust_decimal::Decimal;
+use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -389,11 +390,97 @@ pub fn compute_metrics(
         .count();
     let stop_loss_rate = Decimal::from(stop_loss as u64) / Decimal::from(trades.len() as u64);
 
+    let start = equity_curve.first().expect("checked len");
+    let end = equity_curve.last().expect("checked len");
+    let duration_secs = (end.timestamp - start.timestamp).num_seconds();
+    let years = if duration_secs > 0 {
+        duration_secs as f64 / 31_536_000.0
+    } else {
+        0.0
+    };
+    let annualized_return =
+        if start.equity > Decimal::ZERO && end.equity > Decimal::ZERO && years > 0.0 {
+            let total_return = end.equity / start.equity - Decimal::ONE;
+            let base = Decimal::ONE + total_return;
+            if let Some(base_f64) = base.to_f64() {
+                let ann = base_f64.powf(1.0 / years) - 1.0;
+                Decimal::from_f64(ann).unwrap_or(Decimal::ZERO)
+            } else {
+                Decimal::ZERO
+            }
+        } else {
+            Decimal::ZERO
+        };
+
+    let mut peak = Decimal::ZERO;
+    let mut max_drawdown = Decimal::ZERO;
+    for point in equity_curve {
+        if point.equity > peak {
+            peak = point.equity;
+        }
+        if peak > Decimal::ZERO {
+            let drawdown = (peak - point.equity) / peak;
+            if drawdown > max_drawdown {
+                max_drawdown = drawdown;
+            }
+        }
+    }
+
+    let mut returns = Vec::with_capacity(equity_curve.len().saturating_sub(1));
+    let mut total_delta = 0i64;
+    for window in equity_curve.windows(2) {
+        if let [prev, next] = window
+            && prev.equity > Decimal::ZERO
+        {
+            returns.push((next.equity / prev.equity - Decimal::ONE).to_f64());
+            total_delta += (next.timestamp - prev.timestamp).num_seconds();
+        }
+    }
+    let sharpe_ratio = if returns.len() >= 2 && total_delta > 0 {
+        let valid_returns: Vec<f64> = returns.into_iter().flatten().collect();
+        if valid_returns.len() >= 2 {
+            let mean = valid_returns.iter().copied().sum::<f64>() / valid_returns.len() as f64;
+            let variance = valid_returns
+                .iter()
+                .map(|value| {
+                    let diff = value - mean;
+                    diff * diff
+                })
+                .sum::<f64>()
+                / valid_returns.len() as f64;
+            let std = variance.sqrt();
+            let avg_delta = total_delta as f64 / valid_returns.len() as f64;
+            let periods_per_year = if avg_delta > 0.0 {
+                31_536_000.0 / avg_delta
+            } else {
+                0.0
+            };
+            let risk_free_rate = _risk_free_rate.to_f64().unwrap_or(0.0);
+            let rf_per_period = if periods_per_year > 0.0 {
+                risk_free_rate / periods_per_year
+            } else {
+                0.0
+            };
+            if std > 0.0 {
+                let sharpe = (mean - rf_per_period) / std * periods_per_year.sqrt();
+                Decimal::from_f64(sharpe).unwrap_or(Decimal::ZERO)
+            } else {
+                Decimal::ZERO
+            }
+        } else {
+            Decimal::ZERO
+        }
+    } else {
+        Decimal::ZERO
+    };
+
     Ok(Metrics {
         win_rate,
         profit_factor,
         stop_loss_rate,
-        ..Metrics::default()
+        annualized_return,
+        sharpe_ratio,
+        max_drawdown,
     })
 }
 

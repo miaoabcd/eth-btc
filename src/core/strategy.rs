@@ -10,7 +10,7 @@ use crate::indicators::{VolatilityCalculator, ZScoreCalculator, relative_price};
 use crate::logging::{BarLog, LogEvent};
 use crate::position::{MinSizePolicy, SizeConverter, compute_capital, risk_parity_weights};
 use crate::signals::{EntrySignalDetector, ExitSignalDetector};
-use crate::state::{PositionLeg, PositionSnapshot, StateMachine, StrategyStatus};
+use crate::state::{PositionLeg, PositionSnapshot, StateMachine, StrategyState, StrategyStatus};
 
 #[derive(Debug, Clone)]
 pub struct StrategyBar {
@@ -69,6 +69,12 @@ impl StrategyEngine {
 
     pub fn state(&self) -> &StateMachine {
         &self.state_machine
+    }
+
+    pub fn apply_state(&mut self, state: StrategyState) -> Result<(), StrategyError> {
+        self.state_machine
+            .hydrate(state)
+            .map_err(|err| StrategyError::Position(err.to_string()))
     }
 
     pub async fn process_bar(
