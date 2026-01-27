@@ -1,0 +1,73 @@
+# Strategy configuration template
+
+[strategy]
+entry_z = 1.5
+tp_z = 0.45
+sl_z = 3.5
+n_z = 384
+
+[sigma_floor]
+mode = "CONST" # CONST | QUANTILE | EWMA_MIX
+sigma_floor_const = 0.001
+sigma_floor_quantile_window = 30
+sigma_floor_quantile_p = 0.10
+ewma_half_life = 20
+
+[position]
+c_mode = "FIXED_NOTIONAL" # FIXED_NOTIONAL | EQUITY_RATIO
+c_value = 50000
+# equity_ratio_k = 0.1
+n_vol = 672
+max_position_groups = 1
+
+[funding]
+mode = ["FILTER"] # FILTER | THRESHOLD | SIZE (can combine)
+funding_cost_threshold = 0.001
+funding_threshold_k = 0.5
+funding_size_alpha = 0.5
+c_min_ratio = 0.3
+
+[risk]
+max_hold_hours = 48
+cooldown_hours = 24
+confirm_bars_tp = 0
+
+[data]
+price_field = "MID" # MID | MARK | CLOSE
+
+[execution]
+order_type = "MARKET" # MARKET | LIMIT
+slippage_bps = 5
+
+[logging]
+level = "info"
+format = "json" # json | text
+
+[alerts]
+webhook_url = ""
+email_enabled = false
+
+[backtest]
+include_fees = true
+fee_bps = 2
+include_slippage = true
+slippage_bps = 5
+include_funding = true
+
+[instrument_constraints.eth_perp]
+min_qty = 0.01
+min_notional = 10
+step_size = 0.001
+tick_size = 0.1
+qty_precision = 3
+price_precision = 1
+rounding_mode = "FLOOR"
+
+[instrument_constraints.btc_perp]
+min_qty = 0.001
+min_notional = 10
+step_size = 0.0001
+tick_size = 0.1
+qty_precision = 4
+price_precision = 1
+rounding_mode = "FLOOR"
