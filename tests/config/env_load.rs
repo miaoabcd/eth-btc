@@ -24,7 +24,7 @@ fn clear_env(keys: &[&str]) {
 }
 
 #[test]
-fn load_merges_defaults_file_and_env() {
+fn load_merges_defaults_and_file() {
     let _guard = ENV_LOCK.lock().unwrap();
     let env_keys = ["STRATEGY_ENTRY_Z", "STRATEGY_N_Z", "STRATEGY_PRICE_FIELD"];
     clear_env(&env_keys);
@@ -41,18 +41,12 @@ price_field = "CLOSE"
 "#;
     fs::write(&path, toml).unwrap();
 
-    unsafe {
-        env::set_var("STRATEGY_ENTRY_Z", "1.7");
-        env::set_var("STRATEGY_N_Z", "400");
-        env::set_var("STRATEGY_PRICE_FIELD", "MARK");
-    }
-
     let config = load_config(Some(&path)).unwrap();
 
-    assert_eq!(config.strategy.entry_z, dec!(1.7));
-    assert_eq!(config.strategy.n_z, 400);
+    assert_eq!(config.strategy.entry_z, dec!(1.6));
+    assert_eq!(config.strategy.n_z, 300);
     assert_eq!(config.strategy.sl_z, dec!(4.0));
-    assert_eq!(config.data.price_field, PriceField::Mark);
+    assert_eq!(config.data.price_field, PriceField::Close);
 
     clear_env(&env_keys);
     fs::remove_file(&path).unwrap();
@@ -101,9 +95,12 @@ vault_address = "0xtoml"
 }
 
 #[test]
-fn env_auth_overrides_toml() {
+fn env_overrides_are_ignored() {
     let _guard = ENV_LOCK.lock().unwrap();
     let env_keys = [
+        "STRATEGY_ENTRY_Z",
+        "STRATEGY_N_Z",
+        "STRATEGY_PRICE_FIELD",
         "HYPERLIQUID_PRIVATE_KEY",
         "STRATEGY_PRIVATE_KEY",
         "STRATEGY_API_KEY",
@@ -121,6 +118,9 @@ vault_address = "0xtoml"
     fs::write(&path, toml).unwrap();
 
     unsafe {
+        env::set_var("STRATEGY_ENTRY_Z", "1.7");
+        env::set_var("STRATEGY_N_Z", "400");
+        env::set_var("STRATEGY_PRICE_FIELD", "MARK");
         env::set_var("HYPERLIQUID_PRIVATE_KEY", "env-key");
         env::set_var("STRATEGY_PRIVATE_KEY", "env-fallback");
         env::set_var("STRATEGY_API_KEY", "env-legacy");
@@ -129,8 +129,11 @@ vault_address = "0xtoml"
 
     let config = load_config(Some(&path)).unwrap();
 
-    assert_eq!(config.auth.private_key.as_deref(), Some("env-key"));
-    assert_eq!(config.auth.vault_address.as_deref(), Some("0xenv"));
+    assert_eq!(config.strategy.entry_z, dec!(1.5));
+    assert_eq!(config.strategy.n_z, 384);
+    assert_eq!(config.data.price_field, PriceField::Mid);
+    assert_eq!(config.auth.private_key.as_deref(), Some("toml-key"));
+    assert_eq!(config.auth.vault_address.as_deref(), Some("0xtoml"));
 
     clear_env(&env_keys);
     fs::remove_file(&path).unwrap();

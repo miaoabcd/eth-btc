@@ -1,7 +1,7 @@
 # Full configuration template
 # - Includes strategy, runtime, and auth sections.
 # - If storing secrets here, use a local file (e.g. config.toml.local) and gitignore it.
-# - Env vars can still override (see .env.example).
+# - Env vars are not used for config overrides.
 
 [strategy]
 entry_z = 1.5

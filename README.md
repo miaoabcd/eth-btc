@@ -29,9 +29,9 @@ Configuration is loaded in this order:
 
 Where to put what:
 
-- **config.toml**: full configuration (strategy + runtime + auth). Recommended for a single-source setup.
-- **.env**: optional overrides and secrets (`HYPERLIQUID_*`, `STRATEGY_*`, `RUST_LOG`).
+- **config.toml**: full configuration (strategy + runtime + auth).
 - **CLI flags**: optional runtime overrides (`--base-url`, `--state-path`, `--interval-secs`, `--once`, `--paper`, `--disable-funding`).
+- **Environment variables**: not used for config overrides (except `RUST_LOG` for logging).
 
 See `config.toml.example` and `.env.example` for all available settings.
 
