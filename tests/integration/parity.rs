@@ -29,6 +29,7 @@ fn strategy_bar(timestamp: i64, r: rust_decimal::Decimal) -> StrategyBar {
         btc_price: base,
         funding_eth: None,
         funding_btc: None,
+        funding_interval_hours: None,
     }
 }
 

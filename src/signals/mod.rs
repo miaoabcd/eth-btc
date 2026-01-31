@@ -32,11 +32,9 @@ impl EntrySignalDetector {
         };
 
         let abs_z = zscore.abs();
-        let crossed_into_zone = self
-            .prev_z
-            .map_or(abs_z >= self.entry_z && abs_z < self.sl_z, |prev| {
-                prev.abs() < self.entry_z && abs_z >= self.entry_z && abs_z < self.sl_z
-            });
+        let crossed_into_zone = self.prev_z.map_or(false, |prev| {
+            prev.abs() < self.entry_z && abs_z >= self.entry_z && abs_z < self.sl_z
+        });
 
         self.prev_z = Some(zscore);
 

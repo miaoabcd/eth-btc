@@ -78,12 +78,46 @@ fn default_config_is_valid() {
 }
 
 #[test]
+fn tp_z_must_be_less_than_entry_z() {
+    let mut config = get_default_config();
+    config.strategy.tp_z = config.strategy.entry_z;
+
+    let err = config.validate().expect_err("expected tp_z validation failure");
+    assert!(matches!(
+        err,
+        eth_btc_strategy::config::ConfigError::InvalidValue { field, .. }
+        if field == "strategy.tp_z"
+    ));
+}
+
+#[test]
+fn sigma_floor_quantile_p_must_be_leq_one() {
+    let mut config = get_default_config();
+    config.sigma_floor.sigma_floor_quantile_p = dec!(1.1);
+
+    let err = config
+        .validate()
+        .expect_err("expected sigma_floor_quantile_p upper bound failure");
+    assert!(matches!(
+        err,
+        eth_btc_strategy::config::ConfigError::InvalidValue { field, .. }
+        if field == "sigma_floor.sigma_floor_quantile_p"
+    ));
+}
+
+#[test]
 fn v1_baseline_config_matches_defaults() {
     let config = get_default_config();
 
     assert_eq!(&config, &*V1_BASELINE_CONFIG);
     assert_eq!(V1_BASELINE_CONFIG.strategy.n_z, 384);
     assert_eq!(V1_BASELINE_CONFIG.position.n_vol, 672);
+}
+
+#[test]
+fn symbol_all_returns_static_slice() {
+    let symbols: &'static [Symbol] = Symbol::all();
+    assert_eq!(symbols.len(), 2);
 }
 
 #[test]

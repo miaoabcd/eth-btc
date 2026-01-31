@@ -17,15 +17,18 @@ fn bar(timestamp: i64, r: rust_decimal::Decimal) -> StrategyBar {
         btc_price: base,
         funding_eth: None,
         funding_btc: None,
+        funding_interval_hours: None,
     }
 }
 
 #[tokio::test]
 async fn execution_errors_propagate() {
     let mut config = Config::default();
-    config.strategy.n_z = 4;
+    config.strategy.n_z = 3;
+    config.strategy.entry_z = dec!(1.0);
     config.position.n_vol = 1;
     config.sigma_floor.mode = SigmaFloorMode::Const;
+    config.sigma_floor.sigma_floor_const = dec!(0.02);
 
     let mut executor = MockOrderExecutor::default();
     executor.push_submit_response(
@@ -39,7 +42,7 @@ async fn execution_errors_propagate() {
     let bars = vec![
         bar(0, dec!(0.0)),
         bar(900, dec!(0.0)),
-        bar(1800, dec!(0.0)),
+        bar(1800, dec!(0.01)),
         bar(2700, dec!(0.04)),
     ];
 

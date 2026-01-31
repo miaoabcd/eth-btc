@@ -4,3 +4,5 @@ mod fetch;
 mod history;
 #[path = "data/price.rs"]
 mod price;
+#[path = "data/fetcher.rs"]
+mod fetcher;

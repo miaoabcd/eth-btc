@@ -1,14 +1,16 @@
 use std::collections::{HashMap, VecDeque};
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use chrono::{DateTime, TimeZone, Utc};
 use rust_decimal::Decimal;
-use serde::Deserialize;
 use serde_json::Value;
 use thiserror::Error;
+use tokio::sync::Mutex;
 
 use crate::config::{PriceField, Symbol};
+use crate::util::rate_limiter::{FixedRateLimiter, RateLimiter};
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum DataError {
@@ -105,7 +107,7 @@ pub struct HttpResponse {
 
 #[async_trait::async_trait]
 pub trait HttpClient: Send + Sync {
-    async fn get(&self, url: &str, query: &[(&str, String)]) -> Result<HttpResponse, DataError>;
+    async fn post(&self, url: &str, body: Value) -> Result<HttpResponse, DataError>;
 }
 
 #[derive(Debug, Clone)]
@@ -129,11 +131,11 @@ impl Default for ReqwestHttpClient {
 
 #[async_trait::async_trait]
 impl HttpClient for ReqwestHttpClient {
-    async fn get(&self, url: &str, query: &[(&str, String)]) -> Result<HttpResponse, DataError> {
+    async fn post(&self, url: &str, body: Value) -> Result<HttpResponse, DataError> {
         let response = self
             .client
-            .get(url)
-            .query(&query)
+            .post(url)
+            .json(&body)
             .send()
             .await
             .map_err(|err| {
@@ -153,34 +155,49 @@ impl HttpClient for ReqwestHttpClient {
 }
 
 #[derive(Clone)]
-pub struct VariationalPriceSource {
+pub struct HyperliquidPriceSource {
     base_url: String,
     http: Arc<dyn HttpClient>,
+    rate_limiter: Arc<dyn RateLimiter>,
 }
 
-impl VariationalPriceSource {
+impl HyperliquidPriceSource {
     pub fn new(base_url: impl Into<String>) -> Self {
         Self {
             base_url: base_url.into(),
             http: Arc::new(ReqwestHttpClient::new()),
+            rate_limiter: Arc::new(FixedRateLimiter::new(Duration::from_millis(200))),
         }
     }
 
     pub fn with_client(base_url: impl Into<String>, http: Arc<dyn HttpClient>) -> Self {
+        Self::with_client_and_rate_limiter(
+            base_url,
+            http,
+            Arc::new(FixedRateLimiter::new(Duration::from_millis(200))),
+        )
+    }
+
+    pub fn with_client_and_rate_limiter(
+        base_url: impl Into<String>,
+        http: Arc<dyn HttpClient>,
+        rate_limiter: Arc<dyn RateLimiter>,
+    ) -> Self {
         Self {
             base_url: base_url.into(),
             http,
+            rate_limiter,
         }
     }
 
     fn endpoint_url(&self) -> String {
-        format!("{}/v1/marketdata/bars", self.base_url.trim_end_matches('/'))
+        format!("{}/info", self.base_url.trim_end_matches('/'))
     }
 
     fn symbol_string(symbol: Symbol) -> &'static str {
         match symbol {
-            Symbol::EthPerp => "ETH-PERP",
-            Symbol::BtcPerp => "BTC-PERP",
+            Symbol::EthPerp => "ETH",
+            Symbol::BtcPerp => "BTC",
         }
     }
 
@@ -188,8 +205,8 @@ impl VariationalPriceSource {
         start: DateTime<Utc>,
         end: DateTime<Utc>,
     ) -> Result<(DateTime<Utc>, DateTime<Utc>), DataError> {
-        let start = align_to_bar_close(start);
-        let end = align_to_bar_close(end);
+        let start = align_to_bar_close(start)?;
+        let end = align_to_bar_close(end)?;
         if end < start {
             return Err(DataError::InvalidTimestamp(
                 "end must be >= start".to_string(),
@@ -198,12 +215,9 @@ impl VariationalPriceSource {
         Ok((start, end))
     }
 
-    fn parse_decimal(value: Option<Value>) -> Result<Option<Decimal>, DataError> {
-        let Some(value) = value else {
-            return Ok(None);
-        };
+    fn parse_decimal(value: &Value) -> Result<Decimal, DataError> {
         let value = match value {
-            Value::String(value) => value,
+            Value::String(value) => value.clone(),
             Value::Number(value) => value.to_string(),
             other => {
                 return Err(DataError::Parse(format!(
@@ -212,25 +226,57 @@ impl VariationalPriceSource {
             }
         };
         Decimal::from_str(&value)
-            .map(Some)
             .map_err(|err| DataError::Parse(format!("invalid decimal {value}: {err}")))
     }
 
-    fn parse_bars(&self, symbol: Symbol, body: &str) -> Result<Vec<PriceBar>, DataError> {
-        let response: BarsResponse =
+    fn parse_candles(&self, symbol: Symbol, body: &str) -> Result<Vec<PriceBar>, DataError> {
+        let value: Value =
             serde_json::from_str(body).map_err(|err| DataError::Parse(err.to_string()))?;
+        let candles = if let Some(array) = value.as_array() {
+            array.clone()
+        } else if let Some(array) = value
+            .get("data")
+            .and_then(|data| data.as_array())
+            .cloned()
+        {
+            array
+        } else if let Some(array) = value
+            .get("candles")
+            .and_then(|data| data.as_array())
+            .cloned()
+        {
+            array
+        } else {
+            return Err(DataError::Parse("unexpected candle response".to_string()));
+        };
+
         let mut bars = Vec::new();
-        for record in response.bars {
-            let timestamp = DateTime::parse_from_rfc3339(&record.timestamp)
-                .map_err(|err| DataError::Parse(err.to_string()))?
-                .with_timezone(&Utc);
-            let bar = PriceBar::new(
-                symbol,
-                timestamp,
-                Self::parse_decimal(record.mid)?,
-                Self::parse_decimal(record.mark)?,
-                Self::parse_decimal(record.close)?,
-            );
+        for candle in candles {
+            let timestamp_ms = candle
+                .get("t")
+                .ok_or_else(|| DataError::MissingData("candle timestamp missing".to_string()))?;
+            let timestamp_ms = match timestamp_ms {
+                Value::Number(value) => value
+                    .as_i64()
+                    .ok_or_else(|| DataError::Parse("invalid candle timestamp".to_string()))?,
+                Value::String(value) => value
+                    .parse::<i64>()
+                    .map_err(|_| DataError::Parse("invalid candle timestamp".to_string()))?,
+                other => {
+                    return Err(DataError::Parse(format!(
+                        "unsupported candle timestamp: {other}"
+                    )));
+                }
+            };
+            let timestamp = Utc
+                .timestamp_millis_opt(timestamp_ms)
+                .single()
+                .ok_or_else(|| DataError::InvalidTimestamp("candle timestamp invalid".to_string()))?;
+            let close = candle
+                .get("c")
+                .ok_or_else(|| DataError::MissingData("candle close missing".to_string()))?;
+            let close = Self::parse_decimal(close)?;
+            let bar = PriceBar::new(symbol, timestamp, Some(close), Some(close), Some(close));
             bar.validate()?;
             bars.push(bar);
         }
@@ -239,13 +285,13 @@ impl VariationalPriceSource {
 }
 
 #[async_trait::async_trait]
-impl PriceSource for VariationalPriceSource {
+impl PriceSource for HyperliquidPriceSource {
     async fn fetch_bar(
         &self,
         symbol: Symbol,
         timestamp: DateTime<Utc>,
     ) -> Result<PriceBar, DataError> {
-        let aligned = align_to_bar_close(timestamp);
+        let aligned = align_to_bar_close(timestamp)?;
         let mut bars = self.fetch_history(symbol, aligned, aligned).await?;
         let bar = bars
             .iter()
@@ -269,16 +315,23 @@ impl PriceSource for VariationalPriceSource {
     ) -> Result<Vec<PriceBar>, DataError> {
         let (start, end) = Self::normalize_range(start, end)?;
         let url = self.endpoint_url();
-        let query = vec![
-            ("symbol", Self::symbol_string(symbol).to_string()),
-            ("start", start.to_rfc3339()),
-            ("end", end.to_rfc3339()),
-            ("interval", "15m".to_string()),
-        ];
-        let response = self.http.get(&url, &query).await?;
+        let interval_ms = 900_000i64;
+        let start_ms = start.timestamp_millis();
+        let end_ms = end.timestamp_millis() + interval_ms;
+        let body = serde_json::json!({
+            "type": "candleSnapshot",
+            "req": {
+                "coin": Self::symbol_string(symbol),
+                "interval": "15m",
+                "startTime": start_ms,
+                "endTime": end_ms,
+            }
+        });
+        self.rate_limiter.wait().await;
+        let response = self.http.post(&url, body).await?;
         match response.status {
             200 => {
-                let bars = self.parse_bars(symbol, &response.body)?;
+                let bars = self.parse_candles(symbol, &response.body)?;
                 Ok(bars
                     .into_iter()
                     .filter(|bar| bar.timestamp >= start && bar.timestamp <= end)
@@ -289,6 +342,9 @@ impl PriceSource for VariationalPriceSource {
         }
     }
 }
+
+#[deprecated(note = "use HyperliquidPriceSource")]
+pub type VariationalPriceSource = HyperliquidPriceSource;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PriceSnapshot {
@@ -302,6 +358,7 @@ pub struct PriceSnapshot {
 pub struct PriceFetcher {
     source: Arc<dyn PriceSource>,
     price_field: PriceField,
+    last_snapshot: Arc<Mutex<Option<PriceSnapshot>>>,
 }
 
 impl PriceFetcher {
@@ -309,6 +366,7 @@ impl PriceFetcher {
         Self {
             source,
             price_field,
+            last_snapshot: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -316,7 +374,7 @@ impl PriceFetcher {
         &self,
         timestamp: DateTime<Utc>,
     ) -> Result<PriceSnapshot, DataError> {
-        let aligned = align_to_bar_close(timestamp);
+        let aligned = align_to_bar_close(timestamp)?;
         let eth_bar = self.source.fetch_bar(Symbol::EthPerp, aligned).await?;
         let btc_bar = self.source.fetch_bar(Symbol::BtcPerp, aligned).await?;
         eth_bar.validate()?;
@@ -338,19 +396,30 @@ impl PriceFetcher {
             ));
         }
 
-        let eth_price = eth_bar
-            .effective_price(self.price_field)
-            .ok_or_else(|| DataError::MissingData("ETH price missing".to_string()))?;
-        let btc_price = btc_bar
-            .effective_price(self.price_field)
-            .ok_or_else(|| DataError::MissingData("BTC price missing".to_string()))?;
+        let mut last_snapshot = self.last_snapshot.lock().await;
+        let eth_price = match eth_bar.effective_price(self.price_field) {
+            Some(price) => price,
+            None => last_snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.eth)
+                .ok_or_else(|| DataError::MissingData("ETH price missing".to_string()))?,
+        };
+        let btc_price = match btc_bar.effective_price(self.price_field) {
+            Some(price) => price,
+            None => last_snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.btc)
+                .ok_or_else(|| DataError::MissingData("BTC price missing".to_string()))?,
+        };
 
-        Ok(PriceSnapshot {
+        let snapshot = PriceSnapshot {
             timestamp: aligned,
             eth: eth_price,
             btc: btc_price,
             field: self.price_field,
-        })
+        };
+        *last_snapshot = Some(snapshot.clone());
+        Ok(snapshot)
     }
 }
 
@@ -473,6 +542,10 @@ impl PriceHistory {
         self.len() >= required
     }
 
+    pub fn iter(&self) -> std::collections::vec_deque::Iter<'_, PriceBar> {
+        self.bars.iter()
+    }
+
     pub fn to_vec(&self) -> Vec<PriceBar> {
         self.bars.iter().cloned().collect()
     }
@@ -582,40 +655,27 @@ impl PriceHistorySet {
         }
     }
 
-    pub fn window(&self, symbol: Symbol, window: PriceWindow) -> Vec<PriceBar> {
+    pub fn window<'a>(
+        &'a self,
+        symbol: Symbol,
+        window: PriceWindow,
+    ) -> impl Iterator<Item = &'a PriceBar> {
         let history = match symbol {
             Symbol::EthPerp => &self.eth,
             Symbol::BtcPerp => &self.btc,
         };
         match window {
-            PriceWindow::ZScore => history.zscore.to_vec(),
-            PriceWindow::Volatility => history.volatility.to_vec(),
-            PriceWindow::SigmaQuantile => history.sigma.to_vec(),
+            PriceWindow::ZScore => history.zscore.iter(),
+            PriceWindow::Volatility => history.volatility.iter(),
+            PriceWindow::SigmaQuantile => history.sigma.iter(),
         }
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct BarsResponse {
-    #[serde(default)]
-    bars: Vec<BarRecord>,
-}
-
-#[derive(Debug, Deserialize)]
-struct BarRecord {
-    timestamp: String,
-    #[serde(default)]
-    mid: Option<Value>,
-    #[serde(default)]
-    mark: Option<Value>,
-    #[serde(default)]
-    close: Option<Value>,
-}
-
-pub fn align_to_bar_close(timestamp: DateTime<Utc>) -> DateTime<Utc> {
+pub fn align_to_bar_close(timestamp: DateTime<Utc>) -> Result<DateTime<Utc>, DataError> {
     let seconds = timestamp.timestamp();
     let aligned = seconds - seconds.rem_euclid(900);
-    Utc.timestamp_opt(aligned, 0)
-        .single()
-        .expect("aligned timestamp must be valid")
+    Utc.timestamp_opt(aligned, 0).single().ok_or_else(|| {
+        DataError::InvalidTimestamp("aligned timestamp must be valid".to_string())
+    })
 }

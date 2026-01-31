@@ -32,12 +32,18 @@ fn price_history_set_tracks_multiple_windows() {
     assert!(history.is_warmed_up(PriceWindow::Volatility));
     assert!(history.is_warmed_up(PriceWindow::SigmaQuantile));
 
-    let eth_z = history.window(Symbol::EthPerp, PriceWindow::ZScore);
+    let eth_z: Vec<_> = history
+        .window(Symbol::EthPerp, PriceWindow::ZScore)
+        .cloned()
+        .collect();
     assert_eq!(eth_z.len(), 3);
     assert_eq!(eth_z[0].timestamp, Utc.timestamp_opt(103, 0).unwrap());
     assert_eq!(eth_z[2].timestamp, Utc.timestamp_opt(105, 0).unwrap());
 
-    let btc_vol = history.window(Symbol::BtcPerp, PriceWindow::Volatility);
+    let btc_vol: Vec<_> = history
+        .window(Symbol::BtcPerp, PriceWindow::Volatility)
+        .cloned()
+        .collect();
     assert_eq!(btc_vol.len(), 5);
     assert_eq!(btc_vol[0].timestamp, Utc.timestamp_opt(101, 0).unwrap());
     assert_eq!(btc_vol[4].timestamp, Utc.timestamp_opt(105, 0).unwrap());

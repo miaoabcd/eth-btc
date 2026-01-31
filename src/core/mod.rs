@@ -2,6 +2,7 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 pub mod strategy;
+pub mod pipeline;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TradeDirection {

@@ -1,7 +1,7 @@
 use chrono::{TimeZone, Utc};
 
 use eth_btc_strategy::logging::{
-    Alert, AlertChannel, AlertError, AlertLevel, EmailChannel, EmailTransport,
+    Alert, AlertChannel, AlertError, AlertLevel, EmailChannel, EmailTransport, NoopEmailTransport,
 };
 
 #[derive(Clone, Default)]
@@ -32,4 +32,10 @@ async fn email_channel_throttles_repeats() {
     channel.send(alert.clone()).await.unwrap();
     let second = channel.send(alert).await.unwrap_err();
     assert!(matches!(second, AlertError::Throttled));
+}
+
+#[tokio::test]
+async fn noop_email_transport_succeeds() {
+    let transport = NoopEmailTransport::default();
+    transport.send("subject", "body").await.unwrap();
 }

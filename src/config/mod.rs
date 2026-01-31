@@ -30,8 +30,9 @@ pub enum Symbol {
 }
 
 impl Symbol {
-    pub fn all() -> [Symbol; 2] {
-        [Symbol::EthPerp, Symbol::BtcPerp]
+    pub fn all() -> &'static [Symbol] {
+        const ALL: [Symbol; 2] = [Symbol::EthPerp, Symbol::BtcPerp];
+        &ALL
     }
 }
 
@@ -262,7 +263,9 @@ impl Default for SigmaFloorConfig {
 pub struct PositionConfig {
     pub c_mode: CapitalMode,
     pub c_value: Option<Decimal>,
+    pub equity_value: Option<Decimal>,
     pub equity_ratio_k: Option<Decimal>,
+    pub max_notional: Option<Decimal>,
     pub n_vol: usize,
     pub max_position_groups: u32,
 }
@@ -272,7 +275,9 @@ impl Default for PositionConfig {
         Self {
             c_mode: CapitalMode::FixedNotional,
             c_value: Some(Decimal::new(50000, 0)),
+            equity_value: None,
             equity_ratio_k: None,
+            max_notional: None,
             n_vol: 672,
             max_position_groups: 1,
         }
@@ -463,6 +468,12 @@ impl Config {
                 message: "must be < sl_z".to_string(),
             });
         }
+        if self.strategy.tp_z >= self.strategy.entry_z {
+            return Err(ConfigError::InvalidValue {
+                field: "strategy.tp_z",
+                message: "must be < entry_z".to_string(),
+            });
+        }
         if self.sigma_floor.sigma_floor_const <= Decimal::ZERO {
             return Err(ConfigError::InvalidValue {
                 field: "sigma_floor.sigma_floor_const",
@@ -479,6 +490,12 @@ impl Config {
             return Err(ConfigError::InvalidValue {
                 field: "sigma_floor.sigma_floor_quantile_p",
                 message: "must be > 0".to_string(),
+            });
+        }
+        if self.sigma_floor.sigma_floor_quantile_p > Decimal::ONE {
+            return Err(ConfigError::InvalidValue {
+                field: "sigma_floor.sigma_floor_quantile_p",
+                message: "must be <= 1".to_string(),
             });
         }
         if self.sigma_floor.ewma_half_life == 0 {
@@ -504,7 +521,20 @@ impl Config {
                     field: "position.equity_ratio_k",
                 });
             }
+            CapitalMode::EquityRatio if self.position.equity_value.is_none() => {
+                return Err(ConfigError::MissingValue {
+                    field: "position.equity_value",
+                });
+            }
             _ => {}
+        }
+        if let Some(max_notional) = self.position.max_notional
+            && max_notional <= Decimal::ZERO
+        {
+            return Err(ConfigError::InvalidValue {
+                field: "position.max_notional",
+                message: "must be > 0".to_string(),
+            });
         }
         if self.position.max_position_groups == 0 {
             return Err(ConfigError::InvalidValue {
@@ -592,8 +622,14 @@ impl Config {
         if let Some(value) = overrides.position.c_value {
             self.position.c_value = Some(value);
         }
+        if let Some(value) = overrides.position.equity_value {
+            self.position.equity_value = Some(value);
+        }
         if let Some(value) = overrides.position.equity_ratio_k {
             self.position.equity_ratio_k = Some(value);
+        }
+        if let Some(value) = overrides.position.max_notional {
+            self.position.max_notional = Some(value);
         }
         if let Some(value) = overrides.position.n_vol {
             self.position.n_vol = value;
@@ -736,7 +772,9 @@ pub struct SigmaFloorOverrides {
 pub struct PositionOverrides {
     pub c_mode: Option<CapitalMode>,
     pub c_value: Option<Decimal>,
+    pub equity_value: Option<Decimal>,
     pub equity_ratio_k: Option<Decimal>,
+    pub max_notional: Option<Decimal>,
     pub n_vol: Option<usize>,
     pub max_position_groups: Option<u32>,
 }
@@ -848,9 +886,16 @@ impl ConfigOverrides {
         if let Ok(value) = std::env::var("STRATEGY_C_VALUE") {
             overrides.position.c_value = Some(parse_decimal(&value, "position.c_value")?);
         }
+        if let Ok(value) = std::env::var("STRATEGY_EQUITY_VALUE") {
+            overrides.position.equity_value = Some(parse_decimal(&value, "position.equity_value")?);
+        }
         if let Ok(value) = std::env::var("STRATEGY_EQUITY_RATIO_K") {
             overrides.position.equity_ratio_k =
                 Some(parse_decimal(&value, "position.equity_ratio_k")?);
+        }
+        if let Ok(value) = std::env::var("STRATEGY_MAX_NOTIONAL") {
+            overrides.position.max_notional =
+                Some(parse_decimal(&value, "position.max_notional")?);
         }
         if let Ok(value) = std::env::var("STRATEGY_N_VOL") {
             overrides.position.n_vol = Some(parse_usize(&value, "position.n_vol")?);

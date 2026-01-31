@@ -2,6 +2,8 @@
 mod benchmark;
 #[path = "integration/concurrency.rs"]
 mod concurrency;
+#[path = "integration/connectivity.rs"]
+mod connectivity;
 #[path = "integration/data_flow.rs"]
 mod data_flow;
 #[path = "integration/data_integrity.rs"]

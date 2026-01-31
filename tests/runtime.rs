@@ -2,14 +2,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{TimeZone, Utc};
+use async_trait::async_trait;
 use rust_decimal_macros::dec;
 use tokio::sync::watch;
 
 use eth_btc_strategy::config::{Config, SigmaFloorMode, Symbol};
-use eth_btc_strategy::data::{MockPriceSource, PriceBar, PriceFetcher};
+use eth_btc_strategy::data::{DataError, MockPriceSource, PriceBar, PriceFetcher};
 use eth_btc_strategy::execution::{ExecutionEngine, PaperOrderExecutor, RetryConfig};
 use eth_btc_strategy::funding::{FundingFetcher, FundingRate, MockFundingSource};
-use eth_btc_strategy::runtime::{LiveRunner, StateWriter};
+use eth_btc_strategy::runtime::{LiveRunner, RunnerError, StateWriter};
 use eth_btc_strategy::state::StrategyState;
 
 #[derive(Default)]
@@ -23,8 +24,12 @@ impl MockStateWriter {
     }
 }
 
+#[async_trait]
 impl StateWriter for MockStateWriter {
-    fn save(&self, state: &StrategyState) -> Result<(), eth_btc_strategy::state::StateError> {
+    async fn save(
+        &self,
+        state: &StrategyState,
+    ) -> Result<(), eth_btc_strategy::state::StateError> {
         *self.saved.lock().expect("state lock") = Some(state.clone());
         Ok(())
     }
@@ -121,4 +126,21 @@ async fn runner_persists_state_after_bar() {
     runner.run_once_at(timestamp).await.unwrap();
 
     assert!(writer.saved_state().is_some());
+}
+
+#[tokio::test]
+async fn runner_surfaces_data_errors() {
+    let timestamp = Utc.timestamp_opt(0, 0).unwrap();
+    let config = Config::default();
+    let execution = ExecutionEngine::new(Arc::new(PaperOrderExecutor), RetryConfig::fast());
+    let engine = eth_btc_strategy::core::strategy::StrategyEngine::new(config.clone(), execution)
+        .expect("engine");
+    let price_fetcher = PriceFetcher::new(Arc::new(MockPriceSource::default()), config.data.price_field);
+    let mut runner = LiveRunner::new(engine, price_fetcher, None);
+
+    let err = runner.run_once_at(timestamp).await.unwrap_err();
+    match err {
+        RunnerError::Data(DataError::MissingData(_)) => {}
+        other => panic!("unexpected error: {other:?}"),
+    }
 }

@@ -16,7 +16,9 @@ ewma_half_life = 20
 [position]
 c_mode = "FIXED_NOTIONAL" # FIXED_NOTIONAL | EQUITY_RATIO
 c_value = 50000
+# equity_value = 100000
 # equity_ratio_k = 0.1
+# max_notional = 100000
 n_vol = 672
 max_position_groups = 1
 

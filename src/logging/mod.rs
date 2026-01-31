@@ -176,6 +176,12 @@ impl RetryPolicy {
     }
 }
 
+impl Default for RetryPolicy {
+    fn default() -> Self {
+        Self::fast()
+    }
+}
+
 pub struct WebhookChannel {
     url: String,
     retry: RetryPolicy,
@@ -232,6 +238,16 @@ impl AlertChannel for WebhookChannel {
 #[async_trait::async_trait]
 pub trait EmailTransport: Send + Sync {
     async fn send(&self, subject: &str, body: &str) -> Result<(), AlertError>;
+}
+
+#[derive(Clone, Default)]
+pub struct NoopEmailTransport;
+
+#[async_trait::async_trait]
+impl EmailTransport for NoopEmailTransport {
+    async fn send(&self, _subject: &str, _body: &str) -> Result<(), AlertError> {
+        Ok(())
+    }
 }
 
 pub struct EmailChannel<T: EmailTransport + Clone> {
@@ -300,6 +316,15 @@ pub fn redact_json_value(value: &Value) -> Value {
 pub struct RotationConfig {
     pub max_bytes: u64,
     pub max_files: usize,
+}
+
+impl Default for RotationConfig {
+    fn default() -> Self {
+        Self {
+            max_bytes: 10 * 1024 * 1024,
+            max_files: 5,
+        }
+    }
 }
 
 #[derive(Debug)]

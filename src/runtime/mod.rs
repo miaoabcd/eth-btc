@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use thiserror::Error;
-use tokio::sync::watch;
+use tokio::sync::{Mutex, watch};
 use tokio::time::interval;
 use tracing::{info, warn};
 
@@ -14,36 +14,35 @@ use crate::state::{StateError, StateStore, StrategyState};
 
 #[derive(Debug, Error)]
 pub enum RunnerError {
-    #[error("data error: {0}")]
-    Data(String),
-    #[error("strategy error: {0}")]
-    Strategy(String),
-    #[error("state error: {0}")]
-    State(String),
+    #[error(transparent)]
+    Data(#[from] DataError),
+    #[error(transparent)]
+    Strategy(#[from] StrategyError),
+    #[error(transparent)]
+    State(#[from] StateError),
 }
 
+#[async_trait::async_trait]
 pub trait StateWriter: Send + Sync {
-    fn save(&self, state: &StrategyState) -> Result<(), StateError>;
+    async fn save(&self, state: &StrategyState) -> Result<(), StateError>;
 }
 
 pub struct StateStoreWriter {
-    store: std::sync::Mutex<StateStore>,
+    store: Mutex<StateStore>,
 }
 
 impl StateStoreWriter {
     pub fn new(store: StateStore) -> Self {
         Self {
-            store: std::sync::Mutex::new(store),
+            store: Mutex::new(store),
         }
     }
 }
 
+#[async_trait::async_trait]
 impl StateWriter for StateStoreWriter {
-    fn save(&self, state: &StrategyState) -> Result<(), StateError> {
-        let store = self
-            .store
-            .lock()
-            .map_err(|_| StateError::Persistence("state store mutex poisoned".to_string()))?;
+    async fn save(&self, state: &StrategyState) -> Result<(), StateError> {
+        let store = self.store.lock().await;
         store.save(state)
     }
 }
@@ -93,8 +92,7 @@ impl LiveRunner {
         let snapshot = self
             .price_fetcher
             .fetch_pair_prices(timestamp)
-            .await
-            .map_err(|err| RunnerError::Data(err.to_string()))?;
+            .await?;
 
         let funding = if let Some(fetcher) = &self.funding_fetcher {
             match fetcher.fetch_pair_rates(snapshot.timestamp).await {
@@ -114,17 +112,15 @@ impl LiveRunner {
             btc_price: snapshot.btc,
             funding_eth: funding.as_ref().map(|value| value.eth.rate),
             funding_btc: funding.as_ref().map(|value| value.btc.rate),
+            funding_interval_hours: funding.as_ref().map(|value| value.interval_hours),
         };
 
         let outcome = self
             .engine
             .process_bar(bar)
-            .await
-            .map_err(|err| RunnerError::Strategy(err.to_string()))?;
+            .await?;
         if let Some(writer) = &self.state_writer {
-            writer
-                .save(self.engine.state().state())
-                .map_err(|err| RunnerError::State(err.to_string()))?;
+            writer.save(self.engine.state().state()).await?;
         }
         info!(events = ?outcome.events, "processed bar");
         Ok(outcome)
@@ -150,23 +146,5 @@ impl LiveRunner {
             }
         }
         Ok(())
-    }
-}
-
-impl From<DataError> for RunnerError {
-    fn from(err: DataError) -> Self {
-        RunnerError::Data(err.to_string())
-    }
-}
-
-impl From<StrategyError> for RunnerError {
-    fn from(err: StrategyError) -> Self {
-        RunnerError::Strategy(err.to_string())
-    }
-}
-
-impl From<StateError> for RunnerError {
-    fn from(err: StateError) -> Self {
-        RunnerError::State(err.to_string())
     }
 }

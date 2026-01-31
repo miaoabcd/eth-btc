@@ -4,6 +4,13 @@ use eth_btc_strategy::logging::{FileLogger, RotationConfig};
 use uuid::Uuid;
 
 #[test]
+fn rotation_config_has_default() {
+    let config = RotationConfig::default();
+    assert!(config.max_bytes > 0);
+    assert!(config.max_files > 0);
+}
+
+#[test]
 fn file_logger_rotates_when_exceeding_size() {
     let dir = std::env::temp_dir().join(format!("eth_btc_logs_{}", Uuid::new_v4()));
     fs::create_dir_all(&dir).unwrap();

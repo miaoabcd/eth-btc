@@ -1,5 +1,3 @@
-#![allow(unused_crate_dependencies)]
-
 pub mod backtest;
 pub mod cli;
 pub mod config;
@@ -14,3 +12,4 @@ pub mod position;
 pub mod runtime;
 pub mod signals;
 pub mod state;
+pub mod util;

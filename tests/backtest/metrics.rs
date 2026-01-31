@@ -94,7 +94,18 @@ fn metrics_compute_sharpe_ratio() {
 
     let metrics = compute_metrics(&trades, &equity, dec!(0)).unwrap();
 
-    let expected = dec!(0.3333333333);
+    let returns = [0.1f64, -0.05f64];
+    let mean = returns.iter().copied().sum::<f64>() / returns.len() as f64;
+    let variance = returns
+        .iter()
+        .map(|value| {
+            let diff = value - mean;
+            diff * diff
+        })
+        .sum::<f64>()
+        / (returns.len() as f64 - 1.0);
+    let std = variance.sqrt();
+    let expected = Decimal::from_f64(mean / std).unwrap();
     let diff = (metrics.sharpe_ratio - expected).abs();
     assert!(diff <= dec!(0.0001));
 }

@@ -17,13 +17,15 @@ fn bar(timestamp: i64, r: rust_decimal::Decimal) -> StrategyBar {
         btc_price: base,
         funding_eth: None,
         funding_btc: None,
+        funding_interval_hours: None,
     }
 }
 
 fn engine_with_mock(mut config: Config, executor: MockOrderExecutor) -> StrategyEngine {
-    config.strategy.n_z = 4;
+    config.strategy.n_z = 3;
     config.position.n_vol = 1;
     config.sigma_floor.mode = SigmaFloorMode::Const;
+    config.sigma_floor.sigma_floor_const = dec!(0.02);
     let execution = ExecutionEngine::new(std::sync::Arc::new(executor), RetryConfig::fast());
     StrategyEngine::new(config, execution).unwrap()
 }
@@ -31,7 +33,8 @@ fn engine_with_mock(mut config: Config, executor: MockOrderExecutor) -> Strategy
 #[tokio::test]
 async fn e2e_tp_flow() {
     let mut config = Config::default();
-    config.strategy.tp_z = dec!(0.6);
+    config.strategy.entry_z = dec!(1.0);
+    config.strategy.tp_z = dec!(1.0);
 
     let mut executor = MockOrderExecutor::default();
     executor.push_submit_response(eth_btc_strategy::config::Symbol::EthPerp, Ok(dec!(1)));
@@ -43,7 +46,7 @@ async fn e2e_tp_flow() {
     let bars = vec![
         bar(0, dec!(0.0)),
         bar(900, dec!(0.0)),
-        bar(1800, dec!(0.0)),
+        bar(1800, dec!(0.01)),
         bar(2700, dec!(0.04)),
         bar(3600, dec!(0.0)),
     ];
@@ -67,7 +70,7 @@ async fn e2e_tp_flow() {
 async fn e2e_sl_flow_with_cooldown() {
     let mut config = Config::default();
     config.strategy.entry_z = dec!(1.0);
-    config.strategy.sl_z = dec!(1.5);
+    config.strategy.sl_z = dec!(1.2);
 
     let mut executor = MockOrderExecutor::default();
     executor.push_submit_response(eth_btc_strategy::config::Symbol::EthPerp, Ok(dec!(1)));
@@ -80,8 +83,8 @@ async fn e2e_sl_flow_with_cooldown() {
         bar(0, dec!(0.0)),
         bar(900, dec!(0.01)),
         bar(1800, dec!(0.02)),
-        bar(2700, dec!(0.03)),
-        bar(3600, dec!(0.06)),
+        bar(2700, dec!(0.05)),
+        bar(3600, dec!(0.09)),
     ];
     let mut outcome = None;
     for bar in bars {

@@ -10,11 +10,10 @@ use thiserror::Error;
 
 use crate::config::{Config, Symbol};
 use crate::core::{ExitReason, TradeDirection};
+use crate::core::pipeline::SignalPipeline;
 use crate::funding::{FundingRate, estimate_funding_cost};
-use crate::indicators::{VolatilityCalculator, ZScoreCalculator, relative_price};
 use crate::logging::BarLog;
 use crate::position::{MinSizePolicy, SizeConverter, compute_capital, risk_parity_weights};
-use crate::signals::{EntrySignalDetector, ExitSignalDetector};
 use crate::state::{PositionLeg, PositionSnapshot, StateMachine};
 
 #[derive(Debug, Error)]
@@ -31,7 +30,7 @@ pub enum BacktestError {
     Serialization(String),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BacktestBar {
     pub timestamp: DateTime<Utc>,
     pub eth_price: Decimal,
@@ -79,6 +78,7 @@ pub struct Metrics {
     pub win_rate: Decimal,
     pub profit_factor: Decimal,
     pub stop_loss_rate: Decimal,
+    pub trade_count: usize,
 }
 
 impl Default for Metrics {
@@ -90,6 +90,7 @@ impl Default for Metrics {
             win_rate: Decimal::ZERO,
             profit_factor: Decimal::ZERO,
             stop_loss_rate: Decimal::ZERO,
+            trade_count: 0,
         }
     }
 }
@@ -113,17 +114,8 @@ impl BacktestEngine {
     }
 
     pub fn run(&self, bars: &[BacktestBar]) -> Result<BacktestResult, BacktestError> {
-        let mut zcalc = ZScoreCalculator::new(
-            self.config.strategy.n_z,
-            self.config.sigma_floor.clone(),
-            96,
-        )
-        .map_err(|err| BacktestError::Indicator(err.to_string()))?;
-        let mut volcalc = VolatilityCalculator::new(self.config.position.n_vol)
+        let mut pipeline = SignalPipeline::new(&self.config)
             .map_err(|err| BacktestError::Indicator(err.to_string()))?;
-        let mut entry_detector = EntrySignalDetector::new(self.config.strategy.clone());
-        let mut exit_detector =
-            ExitSignalDetector::new(self.config.strategy.clone(), self.config.risk.clone());
         let mut state_machine = StateMachine::new(self.config.risk.clone());
 
         let mut trades = Vec::new();
@@ -138,23 +130,33 @@ impl BacktestEngine {
         let mut open_trade: Option<(PositionSnapshot, Decimal, Decimal)> = None;
 
         for bar in bars {
-            let r = relative_price(bar.eth_price, bar.btc_price)
+            let output = pipeline
+                .update(
+                    bar.timestamp,
+                    bar.eth_price,
+                    bar.btc_price,
+                    state_machine.state().status,
+                    state_machine.state().position.as_ref(),
+                )
                 .map_err(|err| BacktestError::Indicator(err.to_string()))?;
-            let z_snapshot = zcalc
-                .update(r)
-                .map_err(|err| BacktestError::Indicator(err.to_string()))?;
-            let vol_snapshot = volcalc
-                .update(bar.eth_price, bar.btc_price)
-                .map_err(|err| BacktestError::Indicator(err.to_string()))?;
-
-            let entry_signal =
-                entry_detector.update(z_snapshot.zscore, state_machine.state().status);
+            let r = output.r;
+            let z_snapshot = output.z_snapshot;
+            let vol_snapshot = output.vol_snapshot;
+            let entry_signal = output.entry_signal;
+            let exit_signal = output.exit_signal;
             if let Some(signal) = entry_signal
                 && vol_snapshot.vol_eth.is_some()
                 && vol_snapshot.vol_btc.is_some()
             {
                 let capital = compute_capital(&self.config.position, equity)
                     .map_err(|err| BacktestError::Position(err.to_string()))?;
+                if let Some(max_notional) = self.config.position.max_notional
+                    && capital > max_notional
+                {
+                    return Err(BacktestError::Position(format!(
+                        "capital {capital} exceeds max_notional {max_notional}"
+                    )));
+                }
                 let weights = risk_parity_weights(
                     vol_snapshot.vol_eth.unwrap(),
                     vol_snapshot.vol_btc.unwrap(),
@@ -214,12 +216,6 @@ impl BacktestEngine {
                 open_trade = Some((position, bar.eth_price, bar.btc_price));
             }
 
-            let exit_signal = exit_detector.evaluate(
-                z_snapshot.zscore,
-                state_machine.state().status,
-                state_machine.state().position.as_ref(),
-                bar.timestamp,
-            );
             if let Some(exit_signal) = exit_signal
                 && let Some((position, entry_eth, entry_btc)) = open_trade.take()
             {
@@ -233,6 +229,9 @@ impl BacktestEngine {
                         notional_eth: position.eth.notional,
                         notional_btc: position.btc.notional,
                         bar,
+                        holding_hours: (bar.timestamp - position.entry_time)
+                            .num_hours()
+                            .max(0) as u32,
                     },
                     &self.config,
                 )?;
@@ -298,6 +297,7 @@ struct TradeInput<'a> {
     notional_eth: Decimal,
     notional_btc: Decimal,
     bar: &'a BacktestBar,
+    holding_hours: u32,
 }
 
 fn compute_trade_pnl(input: TradeInput<'_>, config: &Config) -> Result<Decimal, BacktestError> {
@@ -347,13 +347,73 @@ fn compute_trade_pnl(input: TradeInput<'_>, config: &Config) -> Result<Decimal, 
             input.notional_btc,
             &eth_rate,
             &btc_rate,
-            config.risk.max_hold_hours,
+            input.holding_hours,
         )
         .map_err(|err| BacktestError::Funding(err.to_string()))?;
         pnl -= estimate.cost_est;
     }
 
     Ok(pnl)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+    use rust_decimal_macros::dec;
+
+    #[test]
+    fn funding_cost_uses_holding_hours() {
+        let mut config = Config::default();
+        config.backtest.include_fees = false;
+        config.backtest.include_slippage = false;
+        config.backtest.include_funding = true;
+        config.backtest.fee_bps = 0;
+        config.backtest.slippage_bps = 0;
+
+        let bar = BacktestBar {
+            timestamp: Utc::now(),
+            eth_price: dec!(100),
+            btc_price: dec!(100),
+            funding_eth: Some(dec!(0.001)),
+            funding_btc: Some(dec!(0.01)),
+        };
+
+        let input = TradeInput {
+            direction: TradeDirection::ShortEthLongBtc,
+            entry_eth: dec!(100),
+            entry_btc: dec!(100),
+            exit_eth: dec!(100),
+            exit_btc: dec!(100),
+            notional_eth: dec!(50),
+            notional_btc: dec!(50),
+            bar: &bar,
+            holding_hours: 2,
+        };
+
+        let expected = estimate_funding_cost(
+            input.direction,
+            input.notional_eth,
+            input.notional_btc,
+            &FundingRate {
+                symbol: Symbol::EthPerp,
+                rate: dec!(0.001),
+                timestamp: bar.timestamp,
+                interval_hours: 8,
+            },
+            &FundingRate {
+                symbol: Symbol::BtcPerp,
+                rate: dec!(0.01),
+                timestamp: bar.timestamp,
+                interval_hours: 8,
+            },
+            input.holding_hours,
+        )
+        .unwrap();
+
+        let pnl = compute_trade_pnl(input, &config).unwrap();
+        assert_eq!(pnl, -expected.cost_est);
+    }
 }
 
 pub fn compute_metrics(
@@ -440,14 +500,19 @@ pub fn compute_metrics(
         let valid_returns: Vec<f64> = returns.into_iter().flatten().collect();
         if valid_returns.len() >= 2 {
             let mean = valid_returns.iter().copied().sum::<f64>() / valid_returns.len() as f64;
-            let variance = valid_returns
-                .iter()
-                .map(|value| {
-                    let diff = value - mean;
-                    diff * diff
-                })
-                .sum::<f64>()
-                / valid_returns.len() as f64;
+            let denom = valid_returns.len() as f64 - 1.0;
+            let variance = if denom > 0.0 {
+                valid_returns
+                    .iter()
+                    .map(|value| {
+                        let diff = value - mean;
+                        diff * diff
+                    })
+                    .sum::<f64>()
+                    / denom
+            } else {
+                0.0
+            };
             let std = variance.sqrt();
             let avg_delta = total_delta as f64 / valid_returns.len() as f64;
             let periods_per_year = if avg_delta > 0.0 {
@@ -457,7 +522,7 @@ pub fn compute_metrics(
             };
             let risk_free_rate = _risk_free_rate.to_f64().unwrap_or(0.0);
             let rf_per_period = if periods_per_year > 0.0 {
-                risk_free_rate / periods_per_year
+                (1.0 + risk_free_rate).powf(1.0 / periods_per_year) - 1.0
             } else {
                 0.0
             };
@@ -481,6 +546,7 @@ pub fn compute_metrics(
         annualized_return,
         sharpe_ratio,
         max_drawdown,
+        trade_count: trades.len(),
     })
 }
 
@@ -488,6 +554,11 @@ pub fn export_metrics_json(path: &Path, metrics: &Metrics) -> Result<(), Backtes
     let payload = serde_json::to_string_pretty(metrics)
         .map_err(|err| BacktestError::Serialization(err.to_string()))?;
     fs::write(path, payload).map_err(|err| BacktestError::Io(err.to_string()))
+}
+
+pub fn load_backtest_bars(path: &Path) -> Result<Vec<BacktestBar>, BacktestError> {
+    let payload = fs::read_to_string(path).map_err(|err| BacktestError::Io(err.to_string()))?;
+    serde_json::from_str(&payload).map_err(|err| BacktestError::Serialization(err.to_string()))
 }
 
 pub fn export_trades_csv(path: &Path, trades: &[Trade]) -> Result<(), BacktestError> {

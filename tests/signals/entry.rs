@@ -42,3 +42,21 @@ fn entry_signal_negative_z_goes_long_eth_short_btc() {
 
     assert_eq!(signal.direction, TradeDirection::LongEthShortBtc);
 }
+
+#[test]
+fn entry_signal_does_not_trigger_on_first_bar_in_zone() {
+    let config = StrategyConfig::default();
+    let mut detector = EntrySignalDetector::new(config);
+
+    let first = detector.update(Some(dec!(1.6)), StrategyStatus::Flat);
+    assert!(first.is_none());
+
+    let still_in_zone = detector.update(Some(dec!(1.7)), StrategyStatus::Flat);
+    assert!(still_in_zone.is_none());
+
+    let below = detector.update(Some(dec!(1.4)), StrategyStatus::Flat);
+    assert!(below.is_none());
+
+    let crossed = detector.update(Some(dec!(1.6)), StrategyStatus::Flat);
+    assert!(crossed.is_some());
+}

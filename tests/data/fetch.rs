@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use chrono::{TimeZone, Utc};
 use rust_decimal_macros::dec;
@@ -6,29 +7,23 @@ use serde_json::json;
 
 use eth_btc_strategy::config::{PriceField, Symbol};
 use eth_btc_strategy::data::{
-    DataError, HttpClient, HttpResponse, MockPriceSource, PriceBar, PriceFetcher, PriceSource,
-    VariationalPriceSource, align_to_bar_close,
+    DataError, HttpClient, HttpResponse, HyperliquidPriceSource, MockPriceSource, PriceBar,
+    PriceFetcher, PriceSource, align_to_bar_close,
 };
+use eth_btc_strategy::util::rate_limiter::RateLimiter;
 
 #[derive(Debug, Clone)]
 struct TestHttpClient {
     expected_url: String,
-    expected_query: Vec<(String, String)>,
+    expected_body: serde_json::Value,
     response: HttpResponse,
 }
 
 #[async_trait::async_trait]
 impl HttpClient for TestHttpClient {
-    async fn get(&self, url: &str, query: &[(&str, String)]) -> Result<HttpResponse, DataError> {
+    async fn post(&self, url: &str, body: serde_json::Value) -> Result<HttpResponse, DataError> {
         assert_eq!(url, self.expected_url);
-        let mut actual = query
-            .iter()
-            .map(|(key, value)| (key.to_string(), value.clone()))
-            .collect::<Vec<_>>();
-        let mut expected = self.expected_query.clone();
-        actual.sort();
-        expected.sort();
-        assert_eq!(actual, expected);
+        assert_eq!(body, self.expected_body);
         Ok(self.response.clone())
     }
 }
@@ -37,6 +32,18 @@ impl HttpClient for TestHttpClient {
 struct MismatchSource {
     eth: PriceBar,
     btc: PriceBar,
+}
+
+#[derive(Default)]
+struct CountingRateLimiter {
+    calls: AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl RateLimiter for CountingRateLimiter {
+    async fn wait(&self) {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+    }
 }
 
 #[async_trait::async_trait]
@@ -65,63 +72,73 @@ impl PriceSource for MismatchSource {
 #[test]
 fn aligns_to_bar_close_on_15m_boundary() {
     let timestamp = Utc.with_ymd_and_hms(2024, 1, 1, 12, 7, 30).unwrap();
-    let aligned = align_to_bar_close(timestamp);
+    let aligned = align_to_bar_close(timestamp).expect("aligned timestamp");
     assert_eq!(aligned, Utc.with_ymd_and_hms(2024, 1, 1, 12, 0, 0).unwrap());
 
     let exact = Utc.with_ymd_and_hms(2024, 1, 1, 12, 15, 0).unwrap();
-    let aligned_exact = align_to_bar_close(exact);
+    let aligned_exact = align_to_bar_close(exact).expect("aligned timestamp");
     assert_eq!(aligned_exact, exact);
 }
 
 #[tokio::test]
-async fn variational_price_source_fetch_bar_parses_response() {
+async fn hyperliquid_price_source_fetch_bar_parses_response() {
     let timestamp = Utc.with_ymd_and_hms(2024, 1, 1, 0, 15, 0).unwrap();
-    let body = json!({
-        "symbol": "ETH-PERP",
-        "bars": [
-            {
-                "timestamp": timestamp.to_rfc3339(),
-                "mid": "100.0",
-                "mark": "100.1",
-                "close": "99.9"
-            }
-        ]
-    })
+    let start_ms = timestamp.timestamp_millis();
+    let end_ms = start_ms + 900_000;
+    let body = json!([
+        {
+            "t": start_ms,
+            "T": end_ms,
+            "o": "100.0",
+            "h": "101.0",
+            "l": "99.0",
+            "c": "99.9",
+            "v": "10.0"
+        }
+    ])
     .to_string();
 
     let client = TestHttpClient {
-        expected_url: "http://localhost/v1/marketdata/bars".to_string(),
-        expected_query: vec![
-            ("symbol".to_string(), "ETH-PERP".to_string()),
-            ("start".to_string(), timestamp.to_rfc3339()),
-            ("end".to_string(), timestamp.to_rfc3339()),
-            ("interval".to_string(), "15m".to_string()),
-        ],
+        expected_url: "http://localhost/info".to_string(),
+        expected_body: json!({
+            "type": "candleSnapshot",
+            "req": {
+                "coin": "ETH",
+                "interval": "15m",
+                "startTime": start_ms,
+                "endTime": end_ms,
+            }
+        }),
         response: HttpResponse { status: 200, body },
     };
 
     let source =
-        VariationalPriceSource::with_client("http://localhost".to_string(), Arc::new(client));
+        HyperliquidPriceSource::with_client("http://localhost".to_string(), Arc::new(client));
     let bar = source.fetch_bar(Symbol::EthPerp, timestamp).await.unwrap();
 
     assert_eq!(bar.symbol, Symbol::EthPerp);
     assert_eq!(bar.timestamp, timestamp);
-    assert_eq!(bar.mid, Some(dec!(100.0)));
-    assert_eq!(bar.mark, Some(dec!(100.1)));
+    assert_eq!(bar.mid, Some(dec!(99.9)));
+    assert_eq!(bar.mark, Some(dec!(99.9)));
     assert_eq!(bar.close, Some(dec!(99.9)));
 }
 
 #[tokio::test]
-async fn variational_price_source_handles_rate_limits() {
+async fn hyperliquid_price_source_handles_rate_limits() {
     let timestamp = Utc.with_ymd_and_hms(2024, 1, 1, 0, 15, 0).unwrap();
+    let start_ms = timestamp.timestamp_millis();
+    let end_ms = start_ms + 900_000;
     let client = TestHttpClient {
-        expected_url: "http://localhost/v1/marketdata/bars".to_string(),
-        expected_query: vec![
-            ("symbol".to_string(), "ETH-PERP".to_string()),
-            ("start".to_string(), timestamp.to_rfc3339()),
-            ("end".to_string(), timestamp.to_rfc3339()),
-            ("interval".to_string(), "15m".to_string()),
-        ],
+        expected_url: "http://localhost/info".to_string(),
+        expected_body: json!({
+            "type": "candleSnapshot",
+            "req": {
+                "coin": "ETH",
+                "interval": "15m",
+                "startTime": start_ms,
+                "endTime": end_ms,
+            }
+        }),
         response: HttpResponse {
             status: 429,
             body: String::new(),
@@ -129,7 +146,7 @@ async fn variational_price_source_handles_rate_limits() {
     };
 
     let source =
-        VariationalPriceSource::with_client("http://localhost".to_string(), Arc::new(client));
+        HyperliquidPriceSource::with_client("http://localhost".to_string(), Arc::new(client));
     let err = source
         .fetch_bar(Symbol::EthPerp, timestamp)
         .await
@@ -138,26 +155,70 @@ async fn variational_price_source_handles_rate_limits() {
 }
 
 #[tokio::test]
-async fn variational_price_source_handles_missing_data() {
+async fn hyperliquid_price_source_applies_rate_limiter() {
     let timestamp = Utc.with_ymd_and_hms(2024, 1, 1, 0, 15, 0).unwrap();
-    let body = json!({
-        "symbol": "ETH-PERP",
-        "bars": []
-    })
+    let start_ms = timestamp.timestamp_millis();
+    let end_ms = start_ms + 900_000;
+    let body = json!([
+        {
+            "t": start_ms,
+            "T": end_ms,
+            "o": "100.0",
+            "h": "101.0",
+            "l": "99.0",
+            "c": "99.9",
+            "v": "10.0"
+        }
+    ])
     .to_string();
+
     let client = TestHttpClient {
-        expected_url: "http://localhost/v1/marketdata/bars".to_string(),
-        expected_query: vec![
-            ("symbol".to_string(), "ETH-PERP".to_string()),
-            ("start".to_string(), timestamp.to_rfc3339()),
-            ("end".to_string(), timestamp.to_rfc3339()),
-            ("interval".to_string(), "15m".to_string()),
-        ],
+        expected_url: "http://localhost/info".to_string(),
+        expected_body: json!({
+            "type": "candleSnapshot",
+            "req": {
+                "coin": "ETH",
+                "interval": "15m",
+                "startTime": start_ms,
+                "endTime": end_ms,
+            }
+        }),
+        response: HttpResponse { status: 200, body },
+    };
+
+    let limiter = Arc::new(CountingRateLimiter::default());
+    let source = HyperliquidPriceSource::with_client_and_rate_limiter(
+        "http://localhost",
+        Arc::new(client),
+        limiter.clone(),
+    );
+    source.fetch_bar(Symbol::EthPerp, timestamp).await.unwrap();
+
+    assert_eq!(limiter.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn hyperliquid_price_source_handles_missing_data() {
+    let timestamp = Utc.with_ymd_and_hms(2024, 1, 1, 0, 15, 0).unwrap();
+    let start_ms = timestamp.timestamp_millis();
+    let end_ms = start_ms + 900_000;
+    let body = json!([]).to_string();
+    let client = TestHttpClient {
+        expected_url: "http://localhost/info".to_string(),
+        expected_body: json!({
+            "type": "candleSnapshot",
+            "req": {
+                "coin": "ETH",
+                "interval": "15m",
+                "startTime": start_ms,
+                "endTime": end_ms,
+            }
+        }),
         response: HttpResponse { status: 200, body },
     };
 
     let source =
-        VariationalPriceSource::with_client("http://localhost".to_string(), Arc::new(client));
+        HyperliquidPriceSource::with_client("http://localhost".to_string(), Arc::new(client));
     let err = source
         .fetch_bar(Symbol::EthPerp, timestamp)
         .await

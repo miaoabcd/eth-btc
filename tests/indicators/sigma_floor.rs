@@ -1,3 +1,4 @@
+use rust_decimal::Decimal;
 use rust_decimal::MathematicalOps;
 use rust_decimal_macros::dec;
 
@@ -47,6 +48,25 @@ fn ewma_std_matches_expected_decay() {
     let expected_var = dec!(0.125);
     let expected_std = expected_var.sqrt().unwrap();
     assert_close(std, expected_std, dec!(0.000001));
+}
+
+#[test]
+fn ewma_std_uses_decimal_decay() {
+    let values = vec![dec!(1.0), dec!(2.0), dec!(3.0)];
+    let half_life = 7;
+    let decay = dec!(0.5).powd(Decimal::ONE / Decimal::from(half_life));
+    let alpha = Decimal::ONE - decay;
+    let mut mean = values[0];
+    let mut variance = Decimal::ZERO;
+    for value in values.iter().skip(1) {
+        let delta = *value - mean;
+        mean += alpha * delta;
+        let diff = *value - mean;
+        variance = alpha * diff * diff + (Decimal::ONE - alpha) * variance;
+    }
+    let expected = variance.sqrt().unwrap();
+    let actual = ewma_std(&values, half_life).unwrap();
+    assert_eq!(actual, expected);
 }
 
 #[test]

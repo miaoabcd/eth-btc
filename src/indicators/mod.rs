@@ -49,6 +49,10 @@ impl RollingWindow {
         self.values.len()
     }
 
+    fn as_slice(&mut self) -> &[Decimal] {
+        self.values.make_contiguous()
+    }
+
     fn to_vec(&self) -> Vec<Decimal> {
         self.values.iter().cloned().collect()
     }
@@ -98,7 +102,13 @@ pub fn relative_price(eth: Decimal, btc: Decimal) -> Result<Decimal, IndicatorEr
             "prices must be > 0".to_string(),
         ));
     }
-    Ok(eth.ln() - btc.ln())
+    let eth_ln = eth
+        .checked_ln()
+        .ok_or_else(|| IndicatorError::Math("ln unavailable for ETH price".to_string()))?;
+    let btc_ln = btc
+        .checked_ln()
+        .ok_or_else(|| IndicatorError::Math("ln unavailable for BTC price".to_string()))?;
+    Ok(eth_ln - btc_ln)
 }
 
 pub fn log_return(current: Decimal, previous: Decimal) -> Result<Decimal, IndicatorError> {
@@ -107,14 +117,17 @@ pub fn log_return(current: Decimal, previous: Decimal) -> Result<Decimal, Indica
             "prices must be > 0".to_string(),
         ));
     }
-    Ok((current / previous).ln())
+    let ratio = current / previous;
+    ratio
+        .checked_ln()
+        .ok_or_else(|| IndicatorError::Math("ln unavailable for return ratio".to_string()))
 }
 
 pub fn ewma_std(values: &[Decimal], half_life: u32) -> Option<Decimal> {
     if values.len() < 2 || half_life == 0 {
         return None;
     }
-    let decay = Decimal::new(5, 1).powf(1.0 / half_life as f64);
+    let decay = Decimal::new(5, 1).powd(Decimal::ONE / Decimal::from(half_life));
     let alpha = Decimal::ONE - decay;
     let mut mean = values[0];
     let mut variance = Decimal::ZERO;
@@ -245,7 +258,7 @@ impl ZScoreCalculator {
             .window
             .std()
             .ok_or_else(|| IndicatorError::Math("sigma unavailable".to_string()))?;
-        let floor = self.sigma_floor.update(sigma, &self.window.to_vec());
+        let floor = self.sigma_floor.update(sigma, self.window.as_slice());
         let sigma_eff = floor.map(|floor| if sigma > floor { sigma } else { floor });
         let zscore = sigma_eff.map(|sigma_eff| {
             if sigma_eff == Decimal::ZERO {

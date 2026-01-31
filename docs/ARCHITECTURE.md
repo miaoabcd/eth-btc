@@ -2,7 +2,7 @@
 
 ## Summary
 
-An ETH/BTC relative value mean reversion trading strategy for the variational.io platform, implemented in Rust. The system computes Z-scores of the log(ETH/BTC) ratio on 15-minute bars and trades paired perpetual futures positions (ETH-PERP + BTC-PERP) with crossing-based entry signals, risk parity position sizing, three-mode funding cost control, atomic order execution with rollback, SQLite state persistence, and a full backtesting engine. The codebase has complete library-level implementations across 12 modules (~4500 lines of Rust) with 89 passing tests, but lacks a working main entry point and live trading loop.
+An ETH/BTC relative value mean reversion trading strategy for the Hyperliquid platform, implemented in Rust. The system computes Z-scores of the log(ETH/BTC) ratio on 15-minute bars and trades paired perpetual futures positions (ETH-PERP + BTC-PERP) with crossing-based entry signals, risk parity position sizing, three-mode funding cost control, atomic order execution with rollback, SQLite state persistence, and a full backtesting engine. The codebase has complete library-level implementations across 12 modules (~4500 lines of Rust) with 89 passing tests, but lacks a working main entry point and live trading loop.
 
 > Analyzed by: claude
 
@@ -31,7 +31,7 @@ An ETH/BTC relative value mean reversion trading strategy for the variational.io
 ### data
 - **Path**: `src/data/mod.rs`
 - **Status**: complete
-- **Description**: PriceBar model, PriceSource trait with VariationalPriceSource HTTP implementation, PriceFetcher for paired ETH/BTC prices, PriceHistory rolling window, PriceHistorySet with separate Z-score/volatility/sigma windows, 15-minute bar alignment, MockPriceSource
+- **Description**: PriceBar model, PriceSource trait with HyperliquidPriceSource HTTP implementation, PriceFetcher for paired ETH/BTC prices, PriceHistory rolling window, PriceHistorySet with separate Z-score/volatility/sigma windows, 15-minute bar alignment, MockPriceSource
 
 ### indicators
 - **Path**: `src/indicators/mod.rs`
@@ -103,7 +103,7 @@ An ETH/BTC relative value mean reversion trading strategy for the variational.io
 | config.baseline | V1_BASELINE_CONFIG static lazy singleton and get_default_config helper | config | inferred | 100% |
 | data.price-bar | PriceBar struct with symbol, timestamp, mid/mark/close prices, effective_price fallback logic, and validation | data | inferred | 100% |
 | data.price-source.trait | PriceSource async trait defining fetch_bar and fetch_history interface | data | inferred | 100% |
-| data.variational-api | VariationalPriceSource HTTP client: fetches 15m bars from variational.io API with range normalization, JSON parsing, rate limit handling | data | inferred | 100% |
+| data.hyperliquid-api | HyperliquidPriceSource HTTP client: fetches 15m bars from Hyperliquid candleSnapshot API with range normalization, JSON parsing, rate limit handling | data | inferred | 100% |
 | data.http-client | HttpClient trait and ReqwestHttpClient implementation with timeout/error handling | data | inferred | 100% |
 | data.price-fetcher | PriceFetcher: fetches paired ETH/BTC PriceSnapshots with timestamp alignment and cross-validation | data | inferred | 100% |
 | data.price-history | PriceHistory: rolling window storage for price bars with capacity limit, push/get/to_vec operations | data | inferred | 100% |
@@ -187,7 +187,7 @@ An ETH/BTC relative value mean reversion trading strategy for the variational.io
 ## Recommendations
 
 - Replace ZeroFundingSource with a real funding data source for live runs
-- Validate LiveOrderExecutor endpoints/auth against variational.io API spec
+- Validate LiveOrderExecutor endpoints/auth against Hyperliquid API spec
 
 ## Commands
 

@@ -30,8 +30,9 @@ fn backtest_engine_runs_and_generates_trades() {
         bar(0, dec!(0.0)),
         bar(900, dec!(0.0)),
         bar(1800, dec!(0.0)),
-        bar(2700, dec!(0.04)),
-        bar(3600, dec!(0.0)),
+        bar(2700, dec!(0.0)),
+        bar(3600, dec!(0.04)),
+        bar(4500, dec!(0.0)),
     ];
 
     let engine = BacktestEngine::new(config);

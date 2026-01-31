@@ -1,6 +1,6 @@
 use clap::Parser;
 
-use eth_btc_strategy::cli::Cli;
+use eth_btc_strategy::cli::{Cli, Command};
 
 #[test]
 fn cli_parses_runtime_flags() {
@@ -30,4 +30,26 @@ fn cli_parses_runtime_flags() {
     assert_eq!(cli.api_key.as_deref(), Some("token"));
     assert_eq!(cli.config.unwrap().to_str().unwrap(), "config.toml");
     assert_eq!(cli.state_path.unwrap().to_str().unwrap(), "state.sqlite");
+    assert!(cli.command.is_none());
+}
+
+#[test]
+fn cli_parses_backtest_subcommand() {
+    let cli = Cli::try_parse_from([
+        "bin",
+        "backtest",
+        "--bars",
+        "bars.json",
+        "--output-dir",
+        "out",
+    ])
+    .unwrap();
+
+    match cli.command {
+        Some(Command::Backtest(args)) => {
+            assert_eq!(args.bars.to_str().unwrap(), "bars.json");
+            assert_eq!(args.output_dir.unwrap().to_str().unwrap(), "out");
+        }
+        other => panic!("unexpected command {other:?}"),
+    }
 }

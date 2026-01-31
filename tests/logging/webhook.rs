@@ -10,6 +10,12 @@ struct MockHttpClient {
     responses: std::sync::Arc<std::sync::Mutex<Vec<AlertResponse>>>,
 }
 
+#[test]
+fn retry_policy_has_default() {
+    let policy = RetryPolicy::default();
+    assert!(policy.max_attempts >= 1);
+}
+
 #[async_trait::async_trait]
 impl AlertHttpClient for MockHttpClient {
     async fn post(&self, _url: &str, _payload: &str) -> Result<AlertResponse, AlertError> {
