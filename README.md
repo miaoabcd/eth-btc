@@ -53,6 +53,17 @@ cargo run --release -- backtest \
 
 If `--output-dir` is omitted, metrics are printed to stdout.
 
+### Download Hyperliquid 15m bars
+
+```bash
+cargo run --release -- download \
+  --start 2024-01-01T00:00:00Z \
+  --end 2024-01-02T00:00:00Z \
+  --output ./data/hyperliquid_bars.json
+```
+
+The output file is a JSON array of backtest bars (ETH/BTC close prices per 15m candle).
+
 ### Paper trading (no live orders)
 
 ```bash

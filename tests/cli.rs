@@ -53,3 +53,27 @@ fn cli_parses_backtest_subcommand() {
         other => panic!("unexpected command {other:?}"),
     }
 }
+
+#[test]
+fn cli_parses_download_subcommand() {
+    let cli = Cli::try_parse_from([
+        "bin",
+        "download",
+        "--start",
+        "2024-01-01T00:00:00Z",
+        "--end",
+        "2024-01-01T01:00:00Z",
+        "--output",
+        "bars.json",
+    ])
+    .unwrap();
+
+    match cli.command {
+        Some(Command::Download(args)) => {
+            assert_eq!(args.start, "2024-01-01T00:00:00Z");
+            assert_eq!(args.end, "2024-01-01T01:00:00Z");
+            assert_eq!(args.output.to_str().unwrap(), "bars.json");
+        }
+        other => panic!("unexpected command {other:?}"),
+    }
+}

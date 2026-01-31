@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, anyhow};
+use chrono::{DateTime, Utc};
 use clap::Parser;
 use tokio::sync::watch;
 use tracing::{info, warn};
@@ -16,6 +17,7 @@ use eth_btc_strategy::cli::{Cli, Command};
 use eth_btc_strategy::config::load_config;
 use eth_btc_strategy::core::strategy::StrategyEngine;
 use eth_btc_strategy::data::{HyperliquidPriceSource, PriceFetcher};
+use eth_btc_strategy::backtest::download::HyperliquidDownloader;
 use eth_btc_strategy::execution::{
     ExecutionEngine, LiveOrderExecutor, PaperOrderExecutor, RetryConfig,
 };
@@ -32,26 +34,6 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let config = load_config(cli.config.as_deref()).context("load config")?;
-
-    if let Some(Command::Backtest(args)) = cli.command {
-        let bars = load_backtest_bars(&args.bars).context("load backtest bars")?;
-        let engine = BacktestEngine::new(config);
-        let result = engine.run(&bars).context("run backtest")?;
-        if let Some(dir) = args.output_dir {
-            std::fs::create_dir_all(&dir).context("create output dir")?;
-            export_metrics_json(&dir.join("metrics.json"), &result.metrics)
-                .context("write metrics")?;
-            export_trades_csv(&dir.join("trades.csv"), &result.trades)
-                .context("write trades")?;
-            export_equity_csv(&dir.join("equity.csv"), &result.equity_curve)
-                .context("write equity")?;
-        } else {
-            let payload = serde_json::to_string_pretty(&result.metrics)
-                .context("format metrics")?;
-            println!("{payload}");
-        }
-        return Ok(());
-    }
 
     let runtime = &config.runtime;
     let base_url = cli
@@ -70,6 +52,44 @@ async fn main() -> anyhow::Result<()> {
         .state_path
         .clone()
         .or_else(|| runtime.state_path.clone().map(PathBuf::from));
+
+    if let Some(command) = &cli.command {
+        match command {
+            Command::Backtest(args) => {
+                let bars = load_backtest_bars(&args.bars).context("load backtest bars")?;
+                let engine = BacktestEngine::new(config);
+                let result = engine.run(&bars).context("run backtest")?;
+                if let Some(dir) = args.output_dir.as_ref() {
+                    std::fs::create_dir_all(dir).context("create output dir")?;
+                    export_metrics_json(&dir.join("metrics.json"), &result.metrics)
+                        .context("write metrics")?;
+                    export_trades_csv(&dir.join("trades.csv"), &result.trades)
+                        .context("write trades")?;
+                    export_equity_csv(&dir.join("equity.csv"), &result.equity_curve)
+                        .context("write equity")?;
+                } else {
+                    let payload = serde_json::to_string_pretty(&result.metrics)
+                        .context("format metrics")?;
+                    println!("{payload}");
+                }
+                return Ok(());
+            }
+            Command::Download(args) => {
+                let start = parse_rfc3339(&args.start).context("parse --start")?;
+                let end = parse_rfc3339(&args.end).context("parse --end")?;
+                let downloader = HyperliquidDownloader::new(base_url.clone());
+                let bars = downloader
+                    .fetch_backtest_bars(start, end)
+                    .await
+                    .context("download bars")?;
+                let payload =
+                    serde_json::to_string_pretty(&bars).context("serialize backtest bars")?;
+                std::fs::write(&args.output, payload).context("write output file")?;
+                info!(count = bars.len(), path = %args.output.display(), "download complete");
+                return Ok(());
+            }
+        }
+    }
 
     let price_source = HyperliquidPriceSource::new(base_url.clone());
     let price_fetcher = PriceFetcher::new(Arc::new(price_source), config.data.price_field);
@@ -141,4 +161,10 @@ async fn main() -> anyhow::Result<()> {
 
     let _ = shutdown_handle.await;
     Ok(())
+}
+
+fn parse_rfc3339(value: &str) -> anyhow::Result<DateTime<Utc>> {
+    let parsed = DateTime::parse_from_rfc3339(value)
+        .with_context(|| format!("invalid RFC3339 timestamp: {value}"))?;
+    Ok(parsed.with_timezone(&Utc))
 }

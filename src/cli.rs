@@ -35,6 +35,7 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum Command {
     Backtest(BacktestArgs),
+    Download(DownloadArgs),
 }
 
 #[derive(Debug, Args)]
@@ -43,4 +44,14 @@ pub struct BacktestArgs {
     pub bars: PathBuf,
     #[arg(long, value_name = "DIR")]
     pub output_dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub struct DownloadArgs {
+    #[arg(long, value_name = "RFC3339")]
+    pub start: String,
+    #[arg(long, value_name = "RFC3339")]
+    pub end: String,
+    #[arg(long, value_name = "PATH")]
+    pub output: PathBuf,
 }
