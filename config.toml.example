@@ -1,4 +1,7 @@
-# Strategy configuration template
+# Strategy configuration template (stable settings)
+# - This file holds strategy parameters only.
+# - Runtime flags (base URL, state path, interval, once/paper, disable funding) are CLI-only.
+# - Secrets/keys should be provided via environment variables (see .env.example).
 
 [strategy]
 entry_z = 1.5

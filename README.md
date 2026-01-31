@@ -27,6 +27,12 @@ Configuration is loaded in this order:
 3. Environment variables (`STRATEGY_*`)
 4. CLI overrides
 
+Where to put what:
+
+- **config.toml**: stable strategy parameters (z-score windows, sizing, funding/risk settings).
+- **.env**: secrets and temporary overrides (`HYPERLIQUID_*`, `STRATEGY_*`, `RUST_LOG`).
+- **CLI flags**: runtime wiring (`--base-url`, `--state-path`, `--interval-secs`, `--once`, `--paper`, `--disable-funding`).
+
 See `config.toml.example` and `.env.example` for all available settings.
 
 ## Usage
@@ -106,4 +112,3 @@ See `.env.example` for the full list, including:
 ```bash
 cargo test
 ```
-
