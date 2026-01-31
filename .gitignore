@@ -24,3 +24,5 @@ Cargo.lock
 /target
 
 review.md
+config.toml
+config.toml.local
