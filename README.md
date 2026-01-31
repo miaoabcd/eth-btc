@@ -29,9 +29,9 @@ Configuration is loaded in this order:
 
 Where to put what:
 
-- **config.toml**: stable strategy parameters (z-score windows, sizing, funding/risk settings).
-- **.env**: secrets and temporary overrides (`HYPERLIQUID_*`, `STRATEGY_*`, `RUST_LOG`).
-- **CLI flags**: runtime wiring (`--base-url`, `--state-path`, `--interval-secs`, `--once`, `--paper`, `--disable-funding`).
+- **config.toml**: full configuration (strategy + runtime + auth). Recommended for a single-source setup.
+- **.env**: optional overrides and secrets (`HYPERLIQUID_*`, `STRATEGY_*`, `RUST_LOG`).
+- **CLI flags**: optional runtime overrides (`--base-url`, `--state-path`, `--interval-secs`, `--once`, `--paper`, `--disable-funding`).
 
 See `config.toml.example` and `.env.example` for all available settings.
 

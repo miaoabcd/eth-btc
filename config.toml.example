@@ -1,7 +1,7 @@
-# Strategy configuration template (stable settings)
-# - This file holds strategy parameters only.
-# - Runtime flags (base URL, state path, interval, once/paper, disable funding) are CLI-only.
-# - Secrets/keys should be provided via environment variables (see .env.example).
+# Full configuration template
+# - Includes strategy, runtime, and auth sections.
+# - If storing secrets here, use a local file (e.g. config.toml.local) and gitignore it.
+# - Env vars can still override (see .env.example).
 
 [strategy]
 entry_z = 1.5
@@ -43,6 +43,18 @@ price_field = "MID" # MID | MARK | CLOSE
 [execution]
 order_type = "MARKET" # MARKET | LIMIT
 slippage_bps = 5
+
+[runtime]
+base_url = "https://api.hyperliquid.xyz"
+interval_secs = 900
+once = false
+paper = false
+disable_funding = false
+# state_path = "state.sqlite"
+
+[auth]
+# private_key = "0xYOUR_PRIVATE_KEY"
+# vault_address = "0xYOUR_VAULT"
 
 [logging]
 level = "info"

@@ -351,6 +351,35 @@ impl Default for ExecutionConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RuntimeConfig {
+    pub base_url: String,
+    pub interval_secs: u64,
+    pub once: bool,
+    pub paper: bool,
+    pub disable_funding: bool,
+    pub state_path: Option<String>,
+}
+
+impl Default for RuntimeConfig {
+    fn default() -> Self {
+        Self {
+            base_url: "https://api.hyperliquid.xyz".to_string(),
+            interval_secs: 900,
+            once: false,
+            paper: false,
+            disable_funding: false,
+            state_path: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct AuthConfig {
+    pub private_key: Option<String>,
+    pub vault_address: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LoggingConfig {
     pub level: String,
     pub format: LogFormat,
@@ -426,6 +455,8 @@ pub struct Config {
     pub risk: RiskConfig,
     pub data: DataConfig,
     pub execution: ExecutionConfig,
+    pub runtime: RuntimeConfig,
+    pub auth: AuthConfig,
     pub logging: LoggingConfig,
     pub alerts: AlertsConfig,
     pub backtest: BacktestConfig,
@@ -446,6 +477,8 @@ impl Default for Config {
             risk: RiskConfig::default(),
             data: DataConfig::default(),
             execution: ExecutionConfig::default(),
+            runtime: RuntimeConfig::default(),
+            auth: AuthConfig::default(),
             logging: LoggingConfig::default(),
             alerts: AlertsConfig::default(),
             backtest: BacktestConfig::default(),
@@ -548,6 +581,26 @@ impl Config {
             return Err(ConfigError::InvalidValue {
                 field: "funding.c_min_ratio",
                 message: "must be between 0 and 1".to_string(),
+            });
+        }
+        if self.runtime.base_url.trim().is_empty() {
+            return Err(ConfigError::InvalidValue {
+                field: "runtime.base_url",
+                message: "must be non-empty".to_string(),
+            });
+        }
+        if self.runtime.interval_secs == 0 {
+            return Err(ConfigError::InvalidValue {
+                field: "runtime.interval_secs",
+                message: "must be > 0".to_string(),
+            });
+        }
+        if let Some(path) = &self.runtime.state_path
+            && path.trim().is_empty()
+        {
+            return Err(ConfigError::InvalidValue {
+                field: "runtime.state_path",
+                message: "must be non-empty when provided".to_string(),
             });
         }
         for symbol in Symbol::all() {
@@ -670,6 +723,30 @@ impl Config {
         if let Some(value) = overrides.execution.slippage_bps {
             self.execution.slippage_bps = value;
         }
+        if let Some(value) = overrides.runtime.base_url {
+            self.runtime.base_url = value;
+        }
+        if let Some(value) = overrides.runtime.interval_secs {
+            self.runtime.interval_secs = value;
+        }
+        if let Some(value) = overrides.runtime.once {
+            self.runtime.once = value;
+        }
+        if let Some(value) = overrides.runtime.paper {
+            self.runtime.paper = value;
+        }
+        if let Some(value) = overrides.runtime.disable_funding {
+            self.runtime.disable_funding = value;
+        }
+        if let Some(value) = overrides.runtime.state_path {
+            self.runtime.state_path = Some(value);
+        }
+        if let Some(value) = overrides.auth.private_key {
+            self.auth.private_key = Some(value);
+        }
+        if let Some(value) = overrides.auth.vault_address {
+            self.auth.vault_address = Some(value);
+        }
         if let Some(value) = overrides.logging.level {
             self.logging.level = value;
         }
@@ -743,6 +820,10 @@ pub struct ConfigOverrides {
     #[serde(default)]
     pub execution: ExecutionOverrides,
     #[serde(default)]
+    pub runtime: RuntimeOverrides,
+    #[serde(default)]
+    pub auth: AuthOverrides,
+    #[serde(default)]
     pub logging: LoggingOverrides,
     #[serde(default)]
     pub alerts: AlertsOverrides,
@@ -804,6 +885,22 @@ pub struct DataOverrides {
 pub struct ExecutionOverrides {
     pub order_type: Option<OrderType>,
     pub slippage_bps: Option<u32>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct RuntimeOverrides {
+    pub base_url: Option<String>,
+    pub interval_secs: Option<u64>,
+    pub once: Option<bool>,
+    pub paper: Option<bool>,
+    pub disable_funding: Option<bool>,
+    pub state_path: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct AuthOverrides {
+    pub private_key: Option<String>,
+    pub vault_address: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -968,6 +1065,31 @@ impl ConfigOverrides {
         if let Ok(value) = std::env::var("STRATEGY_BACKTEST_INCLUDE_FUNDING") {
             overrides.backtest.include_funding =
                 Some(parse_bool(&value, "backtest.include_funding")?);
+        }
+        if overrides.auth.private_key.is_none() {
+            if let Ok(value) = std::env::var("HYPERLIQUID_PRIVATE_KEY") {
+                overrides.auth.private_key = Some(value);
+            }
+        }
+        if overrides.auth.private_key.is_none() {
+            if let Ok(value) = std::env::var("STRATEGY_PRIVATE_KEY") {
+                overrides.auth.private_key = Some(value);
+            }
+        }
+        if overrides.auth.private_key.is_none() {
+            if let Ok(value) = std::env::var("STRATEGY_API_KEY") {
+                overrides.auth.private_key = Some(value);
+            }
+        }
+        if overrides.auth.vault_address.is_none() {
+            if let Ok(value) = std::env::var("HYPERLIQUID_VAULT_ADDRESS") {
+                overrides.auth.vault_address = Some(value);
+            }
+        }
+        if overrides.auth.vault_address.is_none() {
+            if let Ok(value) = std::env::var("HYPERLIQUID_VAULT") {
+                overrides.auth.vault_address = Some(value);
+            }
         }
         Ok(overrides)
     }

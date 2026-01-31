@@ -23,10 +23,10 @@ fn cli_parses_runtime_flags() {
     .unwrap();
 
     assert!(cli.once);
-    assert_eq!(cli.interval_secs, 60);
+    assert_eq!(cli.interval_secs, Some(60));
     assert!(cli.paper);
     assert!(cli.disable_funding);
-    assert_eq!(cli.base_url, "http://localhost");
+    assert_eq!(cli.base_url.as_deref(), Some("http://localhost"));
     assert_eq!(cli.api_key.as_deref(), Some("token"));
     assert_eq!(cli.config.unwrap().to_str().unwrap(), "config.toml");
     assert_eq!(cli.state_path.unwrap().to_str().unwrap(), "state.sqlite");

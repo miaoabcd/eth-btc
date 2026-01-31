@@ -59,6 +59,20 @@ fn default_risk_parameters() {
 }
 
 #[test]
+fn default_runtime_and_auth_parameters() {
+    let config = get_default_config();
+
+    assert_eq!(config.runtime.base_url, "https://api.hyperliquid.xyz");
+    assert_eq!(config.runtime.interval_secs, 900);
+    assert!(!config.runtime.once);
+    assert!(!config.runtime.paper);
+    assert!(!config.runtime.disable_funding);
+    assert!(config.runtime.state_path.is_none());
+    assert!(config.auth.private_key.is_none());
+    assert!(config.auth.vault_address.is_none());
+}
+
+#[test]
 fn default_price_field_and_constraints() {
     let config = get_default_config();
 

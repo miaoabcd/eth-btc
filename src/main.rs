@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -52,31 +53,46 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let price_source = HyperliquidPriceSource::new(cli.base_url.clone());
+    let runtime = &config.runtime;
+    let base_url = cli
+        .base_url
+        .clone()
+        .unwrap_or_else(|| runtime.base_url.clone());
+    let interval_secs = cli.interval_secs.unwrap_or(runtime.interval_secs);
+    let run_once = if cli.once { true } else { runtime.once };
+    let paper = if cli.paper { true } else { runtime.paper };
+    let disable_funding = if cli.disable_funding {
+        true
+    } else {
+        runtime.disable_funding
+    };
+    let state_path = cli
+        .state_path
+        .clone()
+        .or_else(|| runtime.state_path.clone().map(PathBuf::from));
+
+    let price_source = HyperliquidPriceSource::new(base_url.clone());
     let price_fetcher = PriceFetcher::new(Arc::new(price_source), config.data.price_field);
 
-    let funding_fetcher = if cli.disable_funding {
+    let funding_fetcher = if disable_funding {
         None
     } else {
-        let source = HyperliquidFundingSource::new(cli.base_url.clone());
+        let source = HyperliquidFundingSource::new(base_url.clone());
         Some(FundingFetcher::new(Arc::new(source)))
     };
 
-    let execution = if cli.paper {
+    let execution = if paper {
         ExecutionEngine::new(Arc::new(PaperOrderExecutor), RetryConfig::fast())
     } else {
         let private_key = cli
             .private_key
             .or(cli.api_key)
-            .or_else(|| std::env::var("HYPERLIQUID_PRIVATE_KEY").ok())
-            .or_else(|| std::env::var("STRATEGY_PRIVATE_KEY").ok())
-            .or_else(|| std::env::var("STRATEGY_API_KEY").ok());
+            .or_else(|| config.auth.private_key.clone());
         let vault_address = cli
             .vault_address
-            .or_else(|| std::env::var("HYPERLIQUID_VAULT_ADDRESS").ok())
-            .or_else(|| std::env::var("HYPERLIQUID_VAULT").ok());
+            .or_else(|| config.auth.vault_address.clone());
         let key = private_key.ok_or_else(|| anyhow!("missing Hyperliquid private key"))?;
-        let mut executor = LiveOrderExecutor::with_private_key(cli.base_url.clone(), key);
+        let mut executor = LiveOrderExecutor::with_private_key(base_url.clone(), key);
         if let Some(vault) = vault_address {
             executor = executor.with_vault_address(vault);
         }
@@ -85,7 +101,7 @@ async fn main() -> anyhow::Result<()> {
     let mut engine = StrategyEngine::new(config.clone(), execution).context("create engine")?;
 
     let mut state_writer: Option<Arc<dyn StateWriter>> = None;
-    if let Some(path) = cli.state_path.as_ref() {
+    if let Some(path) = state_path.as_ref() {
         let store = StateStore::new(path.to_string_lossy().as_ref()).context("open state store")?;
         if let Some(state) = store.load().context("load state")? {
             let report = recover_state(state, chrono::Utc::now());
@@ -104,7 +120,7 @@ async fn main() -> anyhow::Result<()> {
         runner = runner.with_state_writer(writer);
     }
 
-    if cli.once {
+    if run_once {
         runner.run_once().await.context("run once")?;
         return Ok(());
     }
@@ -117,9 +133,9 @@ async fn main() -> anyhow::Result<()> {
         let _ = shutdown_tx.send(true);
     });
 
-    info!(interval_secs = cli.interval_secs, "starting live loop");
+    info!(interval_secs, "starting live loop");
     runner
-        .run_loop(Duration::from_secs(cli.interval_secs), shutdown_rx)
+        .run_loop(Duration::from_secs(interval_secs), shutdown_rx)
         .await
         .context("run loop")?;
 
