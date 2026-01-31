@@ -23,7 +23,7 @@ n_vol = 672
 max_position_groups = 1
 
 [funding]
-mode = ["FILTER"] # FILTER | THRESHOLD | SIZE (can combine)
+modes = ["FILTER"] # FILTER | THRESHOLD | SIZE (can combine)
 funding_cost_threshold = 0.001
 funding_threshold_k = 0.5
 funding_size_alpha = 0.5
@@ -43,7 +43,7 @@ slippage_bps = 5
 
 [logging]
 level = "info"
-format = "json" # json | text
+format = "JSON" # JSON | TEXT
 
 [alerts]
 webhook_url = ""
@@ -56,7 +56,7 @@ include_slippage = true
 slippage_bps = 5
 include_funding = true
 
-[instrument_constraints.eth_perp]
+[instrument_constraints.ETH_PERP]
 min_qty = 0.01
 min_notional = 10
 step_size = 0.001
@@ -65,7 +65,7 @@ qty_precision = 3
 price_precision = 1
 rounding_mode = "FLOOR"
 
-[instrument_constraints.btc_perp]
+[instrument_constraints.BTC_PERP]
 min_qty = 0.001
 min_notional = 10
 step_size = 0.0001
