@@ -38,6 +38,19 @@ Statistics log:
 - Set `[logging].stats_path` in `config.toml` to append per-bar stats as JSON/TEXT for quick queries.
 - Set `[logging].trade_path` to append trade entry/exit records (one line per trade event).
 
+Quick queries (JSON format examples):
+
+```bash
+# Entries only
+jq -c 'select(.event == "Entry")' trades.log
+
+# Exits with reason
+jq -c 'select(.event | startswith("Exit")) | {timestamp, event, direction, eth_price, btc_price}' trades.log
+
+# Last 20 trade records
+tail -n 20 trades.log | jq -c '.'
+```
+
 See `config.toml.example` and `.env.example` for all available settings.
 
 ## Usage
