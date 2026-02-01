@@ -7,7 +7,7 @@ use crate::core::TradeDirection;
 use crate::core::pipeline::SignalPipeline;
 use crate::execution::{ExecutionEngine, OrderRequest, OrderSide};
 use crate::funding::{FundingRate, apply_funding_controls, estimate_funding_cost};
-use crate::logging::{BarLog, LogEvent};
+use crate::logging::{BarLog, LogEvent, TradeEvent, TradeLog};
 use crate::position::{MinSizePolicy, SizeConverter, compute_capital, risk_parity_weights};
 use crate::state::{PositionLeg, PositionSnapshot, StateMachine, StrategyState, StrategyStatus};
 
@@ -26,6 +26,7 @@ pub struct StrategyOutcome {
     pub state: StrategyStatus,
     pub events: Vec<LogEvent>,
     pub bar_log: BarLog,
+    pub trade_logs: Vec<TradeLog>,
 }
 
 #[derive(Debug, Error)]
@@ -106,6 +107,7 @@ impl StrategyEngine {
         let mut notional_btc = None;
         let mut funding_cost_est = None;
         let mut funding_skip = None;
+        let mut trade_logs = Vec::new();
 
         if let Some(vol_eth) = vol_snapshot.vol_eth
             && let Some(vol_btc) = vol_snapshot.vol_btc
@@ -190,6 +192,7 @@ impl StrategyEngine {
                         Some(notional_btc_value),
                         funding_cost_est,
                         funding_skip,
+                        trade_logs,
                     ));
                 }
             }
@@ -267,6 +270,26 @@ impl StrategyEngine {
                 .enter(position, bar.timestamp)
                 .map_err(|err| StrategyError::Position(err.to_string()))?;
             events.push(LogEvent::Entry);
+            trade_logs.push(TradeLog {
+                timestamp: bar.timestamp,
+                event: TradeEvent::Entry,
+                direction: signal.direction,
+                eth_qty: if signal.direction == TradeDirection::LongEthShortBtc {
+                    eth_order.qty
+                } else {
+                    -eth_order.qty
+                },
+                btc_qty: if signal.direction == TradeDirection::LongEthShortBtc {
+                    -btc_order.qty
+                } else {
+                    btc_order.qty
+                },
+                eth_price: bar.eth_price,
+                btc_price: bar.btc_price,
+                entry_time: bar.timestamp,
+                entry_eth_price: bar.eth_price,
+                entry_btc_price: bar.btc_price,
+            });
         }
 
         if let Some(exit_signal) = exit_signal
@@ -292,6 +315,18 @@ impl StrategyEngine {
                 .close_pair(eth_order, btc_order)
                 .await
                 .map_err(|err| StrategyError::Execution(err.to_string()))?;
+            trade_logs.push(TradeLog {
+                timestamp: bar.timestamp,
+                event: TradeEvent::Exit(exit_signal.reason),
+                direction: position.direction,
+                eth_qty: position.eth.qty,
+                btc_qty: position.btc.qty,
+                eth_price: bar.eth_price,
+                btc_price: bar.btc_price,
+                entry_time: position.entry_time,
+                entry_eth_price: position.eth.avg_price,
+                entry_btc_price: position.btc.avg_price,
+            });
             self.state_machine
                 .exit(exit_signal.reason, bar.timestamp)
                 .map_err(|err| StrategyError::Position(err.to_string()))?;
@@ -309,6 +344,7 @@ impl StrategyEngine {
             notional_btc,
             funding_cost_est,
             funding_skip,
+            trade_logs,
         ))
     }
 
@@ -324,6 +360,7 @@ impl StrategyEngine {
         notional_btc: Option<Decimal>,
         funding_cost_est: Option<Decimal>,
         funding_skip: Option<bool>,
+        trade_logs: Vec<TradeLog>,
     ) -> StrategyOutcome {
         StrategyOutcome {
             state: self.state_machine.state().status,
@@ -351,6 +388,7 @@ impl StrategyEngine {
                 position: self.state_machine.state().position.clone(),
                 events,
             },
+            trade_logs,
         }
     }
 

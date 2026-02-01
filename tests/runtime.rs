@@ -10,12 +10,49 @@ use eth_btc_strategy::config::{Config, SigmaFloorMode, Symbol};
 use eth_btc_strategy::data::{DataError, MockPriceSource, PriceBar, PriceFetcher};
 use eth_btc_strategy::execution::{ExecutionEngine, PaperOrderExecutor, RetryConfig};
 use eth_btc_strategy::funding::{FundingFetcher, FundingRate, MockFundingSource};
+use eth_btc_strategy::logging::{BarLogWriter, TradeLog, TradeLogWriter};
 use eth_btc_strategy::runtime::{LiveRunner, RunnerError, StateWriter};
 use eth_btc_strategy::state::StrategyState;
 
 #[derive(Default)]
 struct MockStateWriter {
     saved: std::sync::Mutex<Option<StrategyState>>,
+}
+
+#[derive(Default)]
+struct MockBarLogWriter {
+    last: std::sync::Mutex<Option<eth_btc_strategy::logging::BarLog>>,
+}
+
+impl MockBarLogWriter {
+    fn last(&self) -> Option<eth_btc_strategy::logging::BarLog> {
+        self.last.lock().expect("barlog lock").clone()
+    }
+}
+
+impl BarLogWriter for MockBarLogWriter {
+    fn write(&self, bar: &eth_btc_strategy::logging::BarLog) -> Result<(), std::io::Error> {
+        *self.last.lock().expect("barlog lock") = Some(bar.clone());
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct MockTradeLogWriter {
+    logs: std::sync::Mutex<Vec<TradeLog>>,
+}
+
+impl MockTradeLogWriter {
+    fn logs(&self) -> Vec<TradeLog> {
+        self.logs.lock().expect("tradelog lock").clone()
+    }
+}
+
+impl TradeLogWriter for MockTradeLogWriter {
+    fn write(&self, log: &TradeLog) -> Result<(), std::io::Error> {
+        self.logs.lock().expect("tradelog lock").push(log.clone());
+        Ok(())
+    }
 }
 
 impl MockStateWriter {
@@ -81,6 +118,34 @@ fn runner_with_mocks(timestamp: chrono::DateTime<Utc>) -> LiveRunner {
     LiveRunner::new(engine, price_fetcher, Some(funding_fetcher))
 }
 
+fn runner_with_trade_sequence(timestamps: &[chrono::DateTime<Utc>]) -> LiveRunner {
+    let mut config = Config::default();
+    config.strategy.n_z = 3;
+    config.position.n_vol = 1;
+    config.strategy.entry_z = dec!(0.5);
+    config.strategy.tp_z = dec!(0.45);
+    config.strategy.sl_z = dec!(10.0);
+    config.position.c_value = Some(dec!(100));
+
+    let mut price_source = MockPriceSource::default();
+    for (idx, ts) in timestamps.iter().enumerate() {
+        let (eth, btc) = match idx {
+            0 | 1 | 2 => (dec!(100), dec!(100)),
+            3 => (dec!(271.8281828), dec!(100)),
+            _ => (dec!(164.872127), dec!(100)),
+        };
+        price_source.insert_bar(PriceBar::new(Symbol::EthPerp, *ts, Some(eth), None, None));
+        price_source.insert_bar(PriceBar::new(Symbol::BtcPerp, *ts, Some(btc), None, None));
+    }
+
+    let execution = ExecutionEngine::new(Arc::new(PaperOrderExecutor), RetryConfig::fast());
+    let engine = eth_btc_strategy::core::strategy::StrategyEngine::new(config.clone(), execution)
+        .expect("engine");
+    let price_fetcher = PriceFetcher::new(Arc::new(price_source), config.data.price_field);
+
+    LiveRunner::new(engine, price_fetcher, None)
+}
+
 #[tokio::test]
 async fn runner_builds_bar_with_funding() {
     let timestamp = Utc.timestamp_opt(0, 0).unwrap();
@@ -126,6 +191,44 @@ async fn runner_persists_state_after_bar() {
     runner.run_once_at(timestamp).await.unwrap();
 
     assert!(writer.saved_state().is_some());
+}
+
+#[tokio::test]
+async fn runner_writes_stats_log() {
+    let timestamp = Utc.timestamp_opt(0, 0).unwrap();
+    let mut runner = runner_with_mocks(timestamp);
+    let writer = Arc::new(MockBarLogWriter::default());
+
+    runner = runner.with_stats_writer(writer.clone());
+
+    runner.run_once_at(timestamp).await.unwrap();
+
+    let logged = writer.last().expect("expected stats log");
+    assert_eq!(logged.timestamp, timestamp);
+    assert_eq!(logged.eth_price, Some(dec!(2000)));
+    assert_eq!(logged.btc_price, Some(dec!(30000)));
+}
+
+#[tokio::test]
+async fn runner_writes_trade_logs() {
+    let timestamps = [
+        Utc.timestamp_opt(0, 0).unwrap(),
+        Utc.timestamp_opt(900, 0).unwrap(),
+        Utc.timestamp_opt(1800, 0).unwrap(),
+        Utc.timestamp_opt(2700, 0).unwrap(),
+        Utc.timestamp_opt(3600, 0).unwrap(),
+    ];
+    let mut runner = runner_with_trade_sequence(&timestamps);
+    let writer = Arc::new(MockTradeLogWriter::default());
+    runner = runner.with_trade_writer(writer.clone());
+
+    for ts in timestamps {
+        runner.run_once_at(ts).await.unwrap();
+    }
+
+    let logs = writer.logs();
+    assert!(logs.iter().any(|log| matches!(log.event, eth_btc_strategy::logging::TradeEvent::Entry)));
+    assert!(logs.iter().any(|log| matches!(log.event, eth_btc_strategy::logging::TradeEvent::Exit(_))));
 }
 
 #[tokio::test]

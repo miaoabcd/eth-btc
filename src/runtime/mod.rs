@@ -10,6 +10,7 @@ use tracing::{info, warn};
 use crate::core::strategy::{StrategyBar, StrategyEngine, StrategyError, StrategyOutcome};
 use crate::data::{DataError, PriceFetcher};
 use crate::funding::FundingFetcher;
+use crate::logging::{BarLogWriter, TradeLogWriter};
 use crate::state::{StateError, StateStore, StrategyState};
 
 #[derive(Debug, Error)]
@@ -52,6 +53,8 @@ pub struct LiveRunner {
     price_fetcher: PriceFetcher,
     funding_fetcher: Option<FundingFetcher>,
     state_writer: Option<Arc<dyn StateWriter>>,
+    stats_writer: Option<Arc<dyn BarLogWriter>>,
+    trade_writer: Option<Arc<dyn TradeLogWriter>>,
     now: Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>,
 }
 
@@ -66,6 +69,8 @@ impl LiveRunner {
             price_fetcher,
             funding_fetcher,
             state_writer: None,
+            stats_writer: None,
+            trade_writer: None,
             now: Arc::new(Utc::now),
         }
     }
@@ -77,6 +82,16 @@ impl LiveRunner {
 
     pub fn with_state_writer(mut self, writer: Arc<dyn StateWriter>) -> Self {
         self.state_writer = Some(writer);
+        self
+    }
+
+    pub fn with_stats_writer(mut self, writer: Arc<dyn BarLogWriter>) -> Self {
+        self.stats_writer = Some(writer);
+        self
+    }
+
+    pub fn with_trade_writer(mut self, writer: Arc<dyn TradeLogWriter>) -> Self {
+        self.trade_writer = Some(writer);
         self
     }
 
@@ -121,6 +136,18 @@ impl LiveRunner {
             .await?;
         if let Some(writer) = &self.state_writer {
             writer.save(self.engine.state().state()).await?;
+        }
+        if let Some(writer) = &self.stats_writer {
+            if let Err(err) = writer.write(&outcome.bar_log) {
+                warn!(error = ?err, "stats log write failed");
+            }
+        }
+        if let Some(writer) = &self.trade_writer {
+            for log in &outcome.trade_logs {
+                if let Err(err) = writer.write(log) {
+                    warn!(error = ?err, "trade log write failed");
+                }
+            }
         }
         info!(events = ?outcome.events, "processed bar");
         Ok(outcome)

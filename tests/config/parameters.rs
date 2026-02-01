@@ -1,6 +1,6 @@
 use eth_btc_strategy::config::{
-    CapitalMode, Config, FundingMode, PriceField, SigmaFloorMode, Symbol, V1_BASELINE_CONFIG,
-    get_default_config,
+    CapitalMode, Config, FundingMode, LogFormat, PriceField, SigmaFloorMode, Symbol,
+    V1_BASELINE_CONFIG, get_default_config,
 };
 use rust_decimal_macros::dec;
 
@@ -70,6 +70,18 @@ fn default_runtime_and_auth_parameters() {
     assert!(config.runtime.state_path.is_none());
     assert!(config.auth.private_key.is_none());
     assert!(config.auth.vault_address.is_none());
+}
+
+#[test]
+fn default_logging_parameters() {
+    let config = get_default_config();
+
+    assert_eq!(config.logging.level, "info");
+    assert!(matches!(config.logging.format, LogFormat::Json | LogFormat::Text));
+    assert!(config.logging.stats_path.is_none());
+    assert!(config.logging.stats_format.is_none());
+    assert!(config.logging.trade_path.is_none());
+    assert!(config.logging.trade_format.is_none());
 }
 
 #[test]

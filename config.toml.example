@@ -59,6 +59,10 @@ disable_funding = false
 [logging]
 level = "info"
 format = "JSON" # JSON | TEXT
+# stats_path = "stats.log"
+# stats_format = "JSON" # JSON | TEXT
+# trade_path = "trades.log"
+# trade_format = "JSON" # JSON | TEXT
 
 [alerts]
 webhook_url = ""

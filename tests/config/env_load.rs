@@ -3,7 +3,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use eth_btc_strategy::config::{PriceField, load_config};
+use eth_btc_strategy::config::{LogFormat, PriceField, load_config};
 use once_cell::sync::Lazy;
 use rust_decimal_macros::dec;
 use uuid::Uuid;
@@ -136,6 +136,50 @@ vault_address = "0xtoml"
     assert_eq!(config.auth.vault_address.as_deref(), Some("0xtoml"));
 
     clear_env(&env_keys);
+    fs::remove_file(&path).unwrap();
+}
+
+#[test]
+fn load_reads_logging_stats_from_toml() {
+    let _guard = ENV_LOCK.lock().unwrap();
+
+    let path = temp_toml_path();
+    let toml = r#"
+[logging]
+level = "debug"
+format = "TEXT"
+stats_path = "stats.log"
+stats_format = "JSON"
+"#;
+    fs::write(&path, toml).unwrap();
+
+    let config = load_config(Some(&path)).unwrap();
+
+    assert_eq!(config.logging.level, "debug");
+    assert!(matches!(config.logging.format, LogFormat::Text));
+    assert_eq!(config.logging.stats_path.as_deref(), Some("stats.log"));
+    assert!(matches!(config.logging.stats_format, Some(LogFormat::Json)));
+
+    fs::remove_file(&path).unwrap();
+}
+
+#[test]
+fn load_reads_logging_trade_from_toml() {
+    let _guard = ENV_LOCK.lock().unwrap();
+
+    let path = temp_toml_path();
+    let toml = r#"
+[logging]
+trade_path = "trades.log"
+trade_format = "TEXT"
+"#;
+    fs::write(&path, toml).unwrap();
+
+    let config = load_config(Some(&path)).unwrap();
+
+    assert_eq!(config.logging.trade_path.as_deref(), Some("trades.log"));
+    assert!(matches!(config.logging.trade_format, Some(LogFormat::Text)));
+
     fs::remove_file(&path).unwrap();
 }
 

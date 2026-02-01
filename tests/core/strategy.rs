@@ -4,6 +4,7 @@ use rust_decimal_macros::dec;
 use eth_btc_strategy::config::{CapitalMode, Config};
 use eth_btc_strategy::core::strategy::StrategyEngine;
 use eth_btc_strategy::core::TradeDirection;
+use eth_btc_strategy::logging::{LogEvent, TradeEvent, TradeLog};
 use eth_btc_strategy::execution::{
     ExecutionEngine, OrderExecutor, OrderRequest, PaperOrderExecutor, RetryConfig,
 };
@@ -81,7 +82,7 @@ async fn strategy_engine_uses_bar_funding_interval() {
     config.strategy.n_z = 3;
     config.position.n_vol = 1;
     config.strategy.entry_z = dec!(0.5);
-    config.strategy.sl_z = dec!(2.0);
+    config.strategy.sl_z = dec!(10.0);
     config.position.c_value = Some(dec!(100));
     config.risk.max_hold_hours = 2;
     config.funding.funding_cost_threshold = Some(dec!(2.0));
@@ -271,5 +272,68 @@ async fn strategy_engine_sets_limit_price_with_slippage() {
         } else {
             assert_eq!(limit, btc_price * (rust_decimal::Decimal::ONE + slippage));
         }
+    }
+}
+
+#[tokio::test]
+async fn strategy_engine_emits_trade_logs_on_entry_and_exit() {
+    let mut config = Config::default();
+    config.strategy.n_z = 3;
+    config.position.n_vol = 1;
+    config.strategy.entry_z = dec!(0.5);
+    config.strategy.tp_z = dec!(0.45);
+    config.strategy.sl_z = dec!(2.0);
+    config.position.c_value = Some(dec!(100));
+
+    let execution =
+        ExecutionEngine::new(std::sync::Arc::new(PaperOrderExecutor), RetryConfig::fast());
+    let mut engine = StrategyEngine::new(config.clone(), execution).unwrap();
+
+    for offset in [0, 900, 1800] {
+        let bar = eth_btc_strategy::core::strategy::StrategyBar {
+            timestamp: Utc.timestamp_opt(offset, 0).unwrap(),
+            eth_price: dec!(100),
+            btc_price: dec!(100),
+            funding_eth: None,
+            funding_btc: None,
+            funding_interval_hours: None,
+        };
+        engine.process_bar(bar).await.unwrap();
+    }
+
+    let entry_bar = eth_btc_strategy::core::strategy::StrategyBar {
+        timestamp: Utc.timestamp_opt(2700, 0).unwrap(),
+        eth_price: dec!(271.8281828),
+        btc_price: dec!(100),
+        funding_eth: None,
+        funding_btc: None,
+        funding_interval_hours: None,
+    };
+
+    let entry_outcome = engine.process_bar(entry_bar).await.unwrap();
+    assert!(entry_outcome.events.contains(&LogEvent::Entry));
+    assert_eq!(entry_outcome.trade_logs.len(), 1);
+    match &entry_outcome.trade_logs[0] {
+        TradeLog { event: TradeEvent::Entry, .. } => {}
+        other => panic!("unexpected entry trade log {other:?}"),
+    }
+
+    let exit_bar = eth_btc_strategy::core::strategy::StrategyBar {
+        timestamp: Utc.timestamp_opt(3600, 0).unwrap(),
+        eth_price: dec!(164.872127),
+        btc_price: dec!(100),
+        funding_eth: None,
+        funding_btc: None,
+        funding_interval_hours: None,
+    };
+
+    let exit_outcome = engine.process_bar(exit_bar).await.unwrap();
+    assert_eq!(exit_outcome.trade_logs.len(), 1);
+    match &exit_outcome.trade_logs[0] {
+        TradeLog {
+            event: TradeEvent::Exit(_),
+            ..
+        } => {}
+        other => panic!("unexpected exit trade log {other:?}"),
     }
 }

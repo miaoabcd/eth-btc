@@ -33,6 +33,11 @@ Where to put what:
 - **CLI flags**: optional runtime overrides (`--base-url`, `--state-path`, `--interval-secs`, `--once`, `--paper`, `--disable-funding`).
 - **Environment variables**: not used for config overrides (except `RUST_LOG` for logging).
 
+Statistics log:
+
+- Set `[logging].stats_path` in `config.toml` to append per-bar stats as JSON/TEXT for quick queries.
+- Set `[logging].trade_path` to append trade entry/exit records (one line per trade event).
+
 See `config.toml.example` and `.env.example` for all available settings.
 
 ## Usage

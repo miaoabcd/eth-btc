@@ -22,6 +22,7 @@ use eth_btc_strategy::execution::{
     ExecutionEngine, LiveOrderExecutor, PaperOrderExecutor, RetryConfig,
 };
 use eth_btc_strategy::funding::{FundingFetcher, HyperliquidFundingSource};
+use eth_btc_strategy::logging::{BarLogFileWriter, TradeLogFileWriter};
 use eth_btc_strategy::runtime::{LiveRunner, StateStoreWriter, StateWriter};
 use eth_btc_strategy::state::{StateStore, recover_state};
 
@@ -138,6 +139,24 @@ async fn main() -> anyhow::Result<()> {
     let mut runner = LiveRunner::new(engine, price_fetcher, funding_fetcher);
     if let Some(writer) = state_writer {
         runner = runner.with_state_writer(writer);
+    }
+    if let Some(path) = config.logging.stats_path.as_ref() {
+        let format = config
+            .logging
+            .stats_format
+            .unwrap_or(config.logging.format);
+        let writer = BarLogFileWriter::new(PathBuf::from(path), format)
+            .context("create stats logger")?;
+        runner = runner.with_stats_writer(Arc::new(writer));
+    }
+    if let Some(path) = config.logging.trade_path.as_ref() {
+        let format = config
+            .logging
+            .trade_format
+            .unwrap_or(config.logging.format);
+        let writer = TradeLogFileWriter::new(PathBuf::from(path), format)
+            .context("create trade logger")?;
+        runner = runner.with_trade_writer(Arc::new(writer));
     }
 
     if run_once {

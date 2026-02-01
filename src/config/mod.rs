@@ -383,6 +383,10 @@ pub struct AuthConfig {
 pub struct LoggingConfig {
     pub level: String,
     pub format: LogFormat,
+    pub stats_path: Option<String>,
+    pub stats_format: Option<LogFormat>,
+    pub trade_path: Option<String>,
+    pub trade_format: Option<LogFormat>,
 }
 
 impl Default for LoggingConfig {
@@ -390,6 +394,10 @@ impl Default for LoggingConfig {
         Self {
             level: "info".to_string(),
             format: LogFormat::Json,
+            stats_path: None,
+            stats_format: None,
+            trade_path: None,
+            trade_format: None,
         }
     }
 }
@@ -603,6 +611,32 @@ impl Config {
                 message: "must be non-empty when provided".to_string(),
             });
         }
+        if let Some(path) = &self.logging.stats_path
+            && path.trim().is_empty()
+        {
+            return Err(ConfigError::InvalidValue {
+                field: "logging.stats_path",
+                message: "must be non-empty when provided".to_string(),
+            });
+        }
+        if self.logging.stats_format.is_some() && self.logging.stats_path.is_none() {
+            return Err(ConfigError::MissingValue {
+                field: "logging.stats_path",
+            });
+        }
+        if let Some(path) = &self.logging.trade_path
+            && path.trim().is_empty()
+        {
+            return Err(ConfigError::InvalidValue {
+                field: "logging.trade_path",
+                message: "must be non-empty when provided".to_string(),
+            });
+        }
+        if self.logging.trade_format.is_some() && self.logging.trade_path.is_none() {
+            return Err(ConfigError::MissingValue {
+                field: "logging.trade_path",
+            });
+        }
         for symbol in Symbol::all() {
             if !self.instrument_constraints.contains_key(&symbol) {
                 return Err(ConfigError::MissingValue {
@@ -752,6 +786,18 @@ impl Config {
         }
         if let Some(value) = overrides.logging.format {
             self.logging.format = value;
+        }
+        if let Some(value) = overrides.logging.stats_path {
+            self.logging.stats_path = Some(value);
+        }
+        if let Some(value) = overrides.logging.stats_format {
+            self.logging.stats_format = Some(value);
+        }
+        if let Some(value) = overrides.logging.trade_path {
+            self.logging.trade_path = Some(value);
+        }
+        if let Some(value) = overrides.logging.trade_format {
+            self.logging.trade_format = Some(value);
         }
         if let Some(value) = overrides.alerts.webhook_url {
             self.alerts.webhook_url = value;
@@ -907,6 +953,10 @@ pub struct AuthOverrides {
 pub struct LoggingOverrides {
     pub level: Option<String>,
     pub format: Option<LogFormat>,
+    pub stats_path: Option<String>,
+    pub stats_format: Option<LogFormat>,
+    pub trade_path: Option<String>,
+    pub trade_format: Option<LogFormat>,
 }
 
 #[derive(Debug, Default, Deserialize)]

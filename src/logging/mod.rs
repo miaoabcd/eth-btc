@@ -11,7 +11,8 @@ use serde_json::Value;
 use thiserror::Error;
 use tokio::time::sleep;
 
-use crate::core::ExitReason;
+use crate::config::LogFormat;
+use crate::core::{ExitReason, TradeDirection};
 use crate::state::{PositionSnapshot, StrategyStatus};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -20,6 +21,26 @@ pub enum LogEvent {
     Exit(ExitReason),
     CooldownStart,
     CooldownEnd,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TradeEvent {
+    Entry,
+    Exit(ExitReason),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TradeLog {
+    pub timestamp: DateTime<Utc>,
+    pub event: TradeEvent,
+    pub direction: TradeDirection,
+    pub eth_qty: Decimal,
+    pub btc_qty: Decimal,
+    pub eth_price: Decimal,
+    pub btc_price: Decimal,
+    pub entry_time: DateTime<Utc>,
+    pub entry_eth_price: Decimal,
+    pub entry_btc_price: Decimal,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -82,6 +103,101 @@ impl LogFormatter {
             z,
             bar.state
         )
+    }
+}
+
+pub trait BarLogWriter: Send + Sync {
+    fn write(&self, bar: &BarLog) -> Result<(), std::io::Error>;
+}
+
+pub struct BarLogFileWriter {
+    logger: Mutex<FileLogger>,
+    formatter: LogFormatter,
+    format: LogFormat,
+}
+
+impl BarLogFileWriter {
+    pub fn new(path: PathBuf, format: LogFormat) -> Result<Self, std::io::Error> {
+        let logger = FileLogger::new(path, RotationConfig::default())?;
+        Ok(Self {
+            logger: Mutex::new(logger),
+            formatter: LogFormatter::default(),
+            format,
+        })
+    }
+}
+
+impl BarLogWriter for BarLogFileWriter {
+    fn write(&self, bar: &BarLog) -> Result<(), std::io::Error> {
+        let line = match self.format {
+            LogFormat::Json => self
+                .formatter
+                .format_json(bar)
+                .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?,
+            LogFormat::Text => self.formatter.format_text(bar),
+        };
+        let mut logger = self.logger.lock().expect("stats log lock");
+        logger.write_line(&line)
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct TradeLogFormatter;
+
+impl TradeLogFormatter {
+    pub fn format_json(&self, log: &TradeLog) -> Result<String, serde_json::Error> {
+        serde_json::to_string(log)
+    }
+
+    pub fn format_text(&self, log: &TradeLog) -> String {
+        format!(
+            "[{}] EVENT={:?} DIR={:?} ETH_QTY={} BTC_QTY={} ETH_PX={} BTC_PX={} ENTRY_TIME={} ENTRY_ETH_PX={} ENTRY_BTC_PX={}",
+            log.timestamp.to_rfc3339(),
+            log.event,
+            log.direction,
+            log.eth_qty,
+            log.btc_qty,
+            log.eth_price,
+            log.btc_price,
+            log.entry_time.to_rfc3339(),
+            log.entry_eth_price,
+            log.entry_btc_price
+        )
+    }
+}
+
+pub trait TradeLogWriter: Send + Sync {
+    fn write(&self, log: &TradeLog) -> Result<(), std::io::Error>;
+}
+
+pub struct TradeLogFileWriter {
+    logger: Mutex<FileLogger>,
+    formatter: TradeLogFormatter,
+    format: LogFormat,
+}
+
+impl TradeLogFileWriter {
+    pub fn new(path: PathBuf, format: LogFormat) -> Result<Self, std::io::Error> {
+        let logger = FileLogger::new(path, RotationConfig::default())?;
+        Ok(Self {
+            logger: Mutex::new(logger),
+            formatter: TradeLogFormatter::default(),
+            format,
+        })
+    }
+}
+
+impl TradeLogWriter for TradeLogFileWriter {
+    fn write(&self, log: &TradeLog) -> Result<(), std::io::Error> {
+        let line = match self.format {
+            LogFormat::Json => self
+                .formatter
+                .format_json(log)
+                .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?,
+            LogFormat::Text => self.formatter.format_text(log),
+        };
+        let mut logger = self.logger.lock().expect("trade log lock");
+        logger.write_line(&line)
     }
 }
 
