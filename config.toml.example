@@ -108,6 +108,8 @@ format = "JSON"
 # trade_path = "trades.log"
 # trade log format: JSON | TEXT (defaults to logging.format)
 # trade_format = "JSON"
+# price DB path for persisted candles (optional)
+# price_db_path = "data/prices.sqlite"
 
 [alerts]
 # webhook URL for alert notifications

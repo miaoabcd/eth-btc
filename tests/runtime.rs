@@ -14,6 +14,7 @@ use eth_btc_strategy::execution::{ExecutionEngine, PaperOrderExecutor, RetryConf
 use eth_btc_strategy::funding::{FundingFetcher, FundingRate, MockFundingSource};
 use eth_btc_strategy::logging::{BarLogWriter, TradeLog, TradeLogWriter};
 use eth_btc_strategy::runtime::{LiveRunner, RunnerError, StateWriter};
+use eth_btc_strategy::storage::{PriceBarRecord, PriceBarWriter};
 use eth_btc_strategy::state::StrategyState;
 
 #[derive(Default)]
@@ -53,6 +54,24 @@ impl MockTradeLogWriter {
 impl TradeLogWriter for MockTradeLogWriter {
     fn write(&self, log: &TradeLog) -> Result<(), std::io::Error> {
         self.logs.lock().expect("tradelog lock").push(log.clone());
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct MockPriceWriter {
+    last: std::sync::Mutex<Option<PriceBarRecord>>,
+}
+
+impl MockPriceWriter {
+    fn last(&self) -> Option<PriceBarRecord> {
+        self.last.lock().expect("price lock").clone()
+    }
+}
+
+impl PriceBarWriter for MockPriceWriter {
+    fn write(&self, record: &PriceBarRecord) -> Result<(), std::io::Error> {
+        *self.last.lock().expect("price lock") = Some(record.clone());
         Ok(())
     }
 }
@@ -231,6 +250,28 @@ async fn runner_writes_trade_logs() {
     let logs = writer.logs();
     assert!(logs.iter().any(|log| matches!(log.event, eth_btc_strategy::logging::TradeEvent::Entry)));
     assert!(logs.iter().any(|log| matches!(log.event, eth_btc_strategy::logging::TradeEvent::Exit(_))));
+}
+
+#[tokio::test]
+async fn runner_writes_price_records() {
+    let timestamp = Utc.timestamp_opt(0, 0).unwrap();
+    let mut runner = runner_with_mocks(timestamp);
+    let writer = Arc::new(MockPriceWriter::default());
+    runner = runner.with_price_writer(writer.clone());
+
+    runner.run_once_at(timestamp).await.unwrap();
+
+    let record = writer.last().expect("expected price record");
+    assert_eq!(record.timestamp, timestamp);
+    assert_eq!(record.eth_mid, Some(dec!(2000)));
+    assert_eq!(record.eth_mark, None);
+    assert_eq!(record.eth_close, None);
+    assert_eq!(record.btc_mid, Some(dec!(30000)));
+    assert_eq!(record.btc_mark, None);
+    assert_eq!(record.btc_close, None);
+    assert_eq!(record.funding_eth, Some(dec!(0.0001)));
+    assert_eq!(record.funding_btc, Some(dec!(0.0002)));
+    assert_eq!(record.funding_interval_hours, Some(8));
 }
 
 #[tokio::test]

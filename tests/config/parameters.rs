@@ -82,6 +82,7 @@ fn default_logging_parameters() {
     assert!(config.logging.stats_format.is_none());
     assert!(config.logging.trade_path.is_none());
     assert!(config.logging.trade_format.is_none());
+    assert!(config.logging.price_db_path.is_none());
 }
 
 #[test]

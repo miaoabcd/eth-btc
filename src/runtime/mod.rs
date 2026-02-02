@@ -12,6 +12,7 @@ use crate::core::strategy::{StrategyBar, StrategyEngine, StrategyError, Strategy
 use crate::data::{DataError, PriceFetcher};
 use crate::funding::FundingFetcher;
 use crate::logging::{BarLogWriter, TradeLogWriter};
+use crate::storage::{PriceBarRecord, PriceBarWriter};
 use crate::state::{StateError, StateStore, StrategyState};
 
 #[derive(Debug, Error)]
@@ -57,6 +58,7 @@ pub struct LiveRunner {
     state_writer: Option<Arc<dyn StateWriter>>,
     stats_writer: Option<Arc<dyn BarLogWriter>>,
     trade_writer: Option<Arc<dyn TradeLogWriter>>,
+    price_writer: Option<Arc<dyn PriceBarWriter>>,
     now: Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>,
 }
 
@@ -74,6 +76,7 @@ impl LiveRunner {
             state_writer: None,
             stats_writer: None,
             trade_writer: None,
+            price_writer: None,
             now: Arc::new(Utc::now),
         }
     }
@@ -103,6 +106,11 @@ impl LiveRunner {
         self
     }
 
+    pub fn with_price_writer(mut self, writer: Arc<dyn PriceBarWriter>) -> Self {
+        self.price_writer = Some(writer);
+        self
+    }
+
     pub async fn run_once(&mut self) -> Result<StrategyOutcome, RunnerError> {
         let now = (self.now)();
         self.run_once_at(now).await
@@ -112,10 +120,11 @@ impl LiveRunner {
         &mut self,
         timestamp: DateTime<Utc>,
     ) -> Result<StrategyOutcome, RunnerError> {
-        let snapshot = self
+        let bars_snapshot = self
             .price_fetcher
-            .fetch_pair_prices(timestamp)
+            .fetch_pair_bars(timestamp)
             .await?;
+        let snapshot = bars_snapshot.snapshot.clone();
 
         let funding = if let Some(fetcher) = &self.funding_fetcher {
             match fetcher.fetch_pair_rates(snapshot.timestamp).await {
@@ -140,6 +149,24 @@ impl LiveRunner {
         } else {
             None
         };
+
+        if let Some(writer) = &self.price_writer {
+            let record = PriceBarRecord {
+                timestamp: snapshot.timestamp,
+                eth_mid: bars_snapshot.eth_bar.mid,
+                eth_mark: bars_snapshot.eth_bar.mark,
+                eth_close: bars_snapshot.eth_bar.close,
+                btc_mid: bars_snapshot.btc_bar.mid,
+                btc_mark: bars_snapshot.btc_bar.mark,
+                btc_close: bars_snapshot.btc_bar.close,
+                funding_eth: funding.as_ref().map(|value| value.eth.rate),
+                funding_btc: funding.as_ref().map(|value| value.btc.rate),
+                funding_interval_hours: funding.as_ref().map(|value| value.interval_hours),
+            };
+            if let Err(err) = writer.write(&record) {
+                warn!(error = ?err, "price record write failed");
+            }
+        }
 
         let bar = StrategyBar {
             timestamp: snapshot.timestamp,

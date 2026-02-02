@@ -377,6 +377,13 @@ pub struct PriceSnapshot {
     pub field: PriceField,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct PriceBarsSnapshot {
+    pub snapshot: PriceSnapshot,
+    pub eth_bar: PriceBar,
+    pub btc_bar: PriceBar,
+}
+
 #[derive(Clone)]
 pub struct PriceFetcher {
     source: Arc<dyn PriceSource>,
@@ -397,6 +404,13 @@ impl PriceFetcher {
         &self,
         timestamp: DateTime<Utc>,
     ) -> Result<PriceSnapshot, DataError> {
+        Ok(self.fetch_pair_bars(timestamp).await?.snapshot)
+    }
+
+    pub async fn fetch_pair_bars(
+        &self,
+        timestamp: DateTime<Utc>,
+    ) -> Result<PriceBarsSnapshot, DataError> {
         let aligned = align_to_bar_close(timestamp)?;
         let eth_bar = self.source.fetch_bar(Symbol::EthPerp, aligned).await?;
         let btc_bar = self.source.fetch_bar(Symbol::BtcPerp, aligned).await?;
@@ -442,7 +456,11 @@ impl PriceFetcher {
             field: self.price_field,
         };
         *last_snapshot = Some(snapshot.clone());
-        Ok(snapshot)
+        Ok(PriceBarsSnapshot {
+            snapshot,
+            eth_bar,
+            btc_bar,
+        })
     }
 }
 

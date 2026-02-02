@@ -420,6 +420,7 @@ pub struct LoggingConfig {
     pub stats_format: Option<LogFormat>,
     pub trade_path: Option<String>,
     pub trade_format: Option<LogFormat>,
+    pub price_db_path: Option<String>,
 }
 
 impl Default for LoggingConfig {
@@ -431,6 +432,7 @@ impl Default for LoggingConfig {
             stats_format: None,
             trade_path: None,
             trade_format: None,
+            price_db_path: None,
         }
     }
 }
@@ -673,6 +675,14 @@ impl Config {
                 field: "logging.trade_path",
             });
         }
+        if let Some(path) = &self.logging.price_db_path
+            && path.trim().is_empty()
+        {
+            return Err(ConfigError::InvalidValue {
+                field: "logging.price_db_path",
+                message: "must be non-empty when provided".to_string(),
+            });
+        }
         for symbol in Symbol::all() {
             if !self.instrument_constraints.contains_key(&symbol) {
                 return Err(ConfigError::MissingValue {
@@ -841,6 +851,9 @@ impl Config {
         if let Some(value) = overrides.logging.trade_format {
             self.logging.trade_format = Some(value);
         }
+        if let Some(value) = overrides.logging.price_db_path {
+            self.logging.price_db_path = Some(value);
+        }
         if let Some(value) = overrides.alerts.webhook_url {
             self.alerts.webhook_url = value;
         }
@@ -1001,6 +1014,7 @@ pub struct LoggingOverrides {
     pub stats_format: Option<LogFormat>,
     pub trade_path: Option<String>,
     pub trade_format: Option<LogFormat>,
+    pub price_db_path: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]

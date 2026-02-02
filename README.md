@@ -149,6 +149,7 @@ See `.env.example` for the full list, including:
 - State persistence uses SQLite and is optional (`--state-path`).
 - Live trading requires valid Hyperliquid credentials.
 - Funding filters rely on current funding rates (no historical funding yet).
+- Set `logging.price_db_path` to persist fetched candles into SQLite for later analysis.
 
 ## Tests
 

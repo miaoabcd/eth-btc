@@ -27,6 +27,7 @@ use eth_btc_strategy::execution::{
 };
 use eth_btc_strategy::funding::{FundingFetcher, HyperliquidFundingSource};
 use eth_btc_strategy::logging::{BarLogFileWriter, TradeLogFileWriter};
+use eth_btc_strategy::storage::{PriceStore, PriceStoreWriter};
 use eth_btc_strategy::runtime::{LiveRunner, StateStoreWriter, StateWriter};
 use eth_btc_strategy::state::{StateStore, recover_state};
 
@@ -243,6 +244,11 @@ async fn main() -> anyhow::Result<()> {
         let writer = TradeLogFileWriter::new(PathBuf::from(path), format)
             .context("create trade logger")?;
         runner = runner.with_trade_writer(Arc::new(writer));
+    }
+    if let Some(path) = config.logging.price_db_path.as_ref() {
+        let store = PriceStore::new(path).context("open price db")?;
+        let writer = PriceStoreWriter::new(store);
+        runner = runner.with_price_writer(Arc::new(writer));
     }
 
     if run_once {
