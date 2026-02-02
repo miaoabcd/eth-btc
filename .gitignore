@@ -28,3 +28,5 @@ config.toml
 config.toml.local
 
 *.log
+
+data/
