@@ -1,87 +1,142 @@
-# Full configuration template
-# - Includes strategy, runtime, and auth sections.
-# - If storing secrets here, use a local file (e.g. config.toml.local) and gitignore it.
-# - Env vars are not used for config overrides.
+# Full configuration template (all settings)
+# - This file is the single source of truth for strategy + runtime + auth.
+# - If you store secrets here, use a local file (e.g. config.toml.local) and gitignore it.
+# - CLI flags can override runtime settings at launch.
 
 [strategy]
-entry_z = 1.5
-tp_z = 0.45
-sl_z = 3.5
+# z-score window length (number of 15m bars)
 n_z = 384
+# entry threshold (abs z must cross into this band)
+entry_z = 1.5
+# take-profit threshold (abs z <= tp_z)
+tp_z = 0.45
+# stop-loss threshold (abs z >= sl_z)
+sl_z = 3.5
 
 [sigma_floor]
-mode = "CONST" # CONST | QUANTILE | EWMA_MIX
+# mode: CONST | QUANTILE | EWMA_MIX
+mode = "CONST"
+# constant sigma floor when mode=CONST
 sigma_floor_const = 0.001
+# quantile window length in days (multiplied by bars_per_day)
 sigma_floor_quantile_window = 30
+# quantile probability for sigma floor (0 < p <= 1)
 sigma_floor_quantile_p = 0.10
+# EWMA half-life (in bars) when mode=EWMA_MIX
 ewma_half_life = 20
 
 [position]
-c_mode = "FIXED_NOTIONAL" # FIXED_NOTIONAL | EQUITY_RATIO
+# capital mode: FIXED_NOTIONAL | EQUITY_RATIO
+c_mode = "FIXED_NOTIONAL"
+# fixed notional capital (required when c_mode=FIXED_NOTIONAL)
 c_value = 50000
+# equity value (required when c_mode=EQUITY_RATIO)
 # equity_value = 100000
+# equity ratio multiplier k (required when c_mode=EQUITY_RATIO)
 # equity_ratio_k = 0.1
+# max total notional cap (optional)
 # max_notional = 100000
+# volatility window length (number of 15m bars)
 n_vol = 672
+# max concurrent position groups (>= 1)
 max_position_groups = 1
 
 [funding]
-modes = ["FILTER"] # FILTER | THRESHOLD | SIZE (can combine)
+# modes: FILTER | THRESHOLD | SIZE (can combine)
+modes = ["FILTER"]
+# filter: skip entries if funding cost > threshold
 funding_cost_threshold = 0.001
+# threshold: increase entry_z by k * normalized funding cost
 funding_threshold_k = 0.5
+# size: reduce capital by alpha * normalized funding cost
 funding_size_alpha = 0.5
+# minimum capital ratio when size reduction applied (0..1)
 c_min_ratio = 0.3
 
 [risk]
+# maximum holding time in hours
 max_hold_hours = 48
+# cooldown period after exit (hours)
 cooldown_hours = 24
+# number of consecutive bars required for TP confirmation
 confirm_bars_tp = 0
 
 [data]
-price_field = "MID" # MID | MARK | CLOSE
+# price field: MID | MARK | CLOSE
+price_field = "MID"
 
 [execution]
-order_type = "MARKET" # MARKET | LIMIT
+# order type: MARKET | LIMIT
+order_type = "MARKET"
+# slippage in bps used for LIMIT pricing
 slippage_bps = 5
 
 [runtime]
+# Hyperliquid API base URL
 base_url = "https://api.hyperliquid.xyz"
+# loop interval in seconds
 interval_secs = 900
+# run a single iteration and exit
 once = false
+# use paper executor (no live orders)
 paper = false
+# disable funding filters (ignore funding rates)
 disable_funding = false
+# optional SQLite state path
 # state_path = "state.sqlite"
 
 [auth]
+# Hyperliquid private key (hex string, 0x...) for live trading
 # private_key = "0xYOUR_PRIVATE_KEY"
+# optional vault address
 # vault_address = "0xYOUR_VAULT"
 
 [logging]
+# log level (tracing subscriber)
 level = "info"
-format = "JSON" # JSON | TEXT
+# log format: JSON | TEXT
+format = "JSON"
+# per-bar statistics log file (optional)
 # stats_path = "stats.log"
-# stats_format = "JSON" # JSON | TEXT
+# stats log format: JSON | TEXT (defaults to logging.format)
+# stats_format = "JSON"
+# trade log file (optional)
 # trade_path = "trades.log"
-# trade_format = "JSON" # JSON | TEXT
+# trade log format: JSON | TEXT (defaults to logging.format)
+# trade_format = "JSON"
 
 [alerts]
+# webhook URL for alert notifications
 webhook_url = ""
+# enable email alerts (requires EmailTransport integration)
 email_enabled = false
 
 [backtest]
+# include fees in PnL
 include_fees = true
+# fee in bps
 fee_bps = 2
+# include slippage in PnL
 include_slippage = true
+# slippage in bps
 slippage_bps = 5
+# include funding in PnL (requires funding data in bars)
 include_funding = true
 
 [instrument_constraints.ETH_PERP]
+# minimum order quantity
 min_qty = 0.01
+# minimum notional value
 min_notional = 10
+# size step
 step_size = 0.001
+# price tick size
 tick_size = 0.1
+# quantity precision (decimal places)
 qty_precision = 3
+# price precision (decimal places)
 price_precision = 1
+# rounding mode: FLOOR | CEIL | ROUND
 rounding_mode = "FLOOR"
 
 [instrument_constraints.BTC_PERP]
