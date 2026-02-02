@@ -26,3 +26,5 @@ Cargo.lock
 review.md
 config.toml
 config.toml.local
+
+*.log
