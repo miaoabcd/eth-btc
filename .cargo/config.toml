@@ -1,7 +1,0 @@
-[build]
-target-dir = "target"
-rustc-wrapper = "scripts/rustc-wrapper.sh"
-
-[env]
-TMPDIR = { value = "/home/noone/work/eth-btc/.tmp" }
-RUSTC_TMPDIR = { value = "/home/noone/work/eth-btc/.tmp" }
