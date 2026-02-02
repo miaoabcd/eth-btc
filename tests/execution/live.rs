@@ -152,6 +152,41 @@ async fn live_executor_posts_order_payload() {
 }
 
 #[tokio::test]
+async fn live_executor_updates_leverage_before_order() {
+    let client = std::sync::Arc::new(MockOrderHttpClient::default());
+    client.push_response(OrderHttpResponse {
+        status: 200,
+        body: r#"{"universe":[{"name":"ETH","szDecimals":3},{"name":"BTC","szDecimals":3}]}"#
+            .to_string(),
+    });
+    client.push_response(OrderHttpResponse {
+        status: 200,
+        body: r#"{"status":"ok","response":{"type":"updateLeverage","data":{"status":"success"}}}"#
+            .to_string(),
+    });
+    client.push_response(OrderHttpResponse {
+        status: 200,
+        body: r#"{"status":"ok","response":{"type":"order","data":{"statuses":[{"filled":{"totalSz":"1.25","avgPx":"2000","oid":1}}]}}}"#
+            .to_string(),
+    });
+
+    let executor = signed_executor(client.clone()).with_leverage_config(5, true);
+    let filled = executor.submit(&order()).await.unwrap();
+
+    assert_eq!(filled, dec!(1.25));
+
+    let requests = client.requests.lock().expect("requests lock");
+    assert_eq!(requests.len(), 3);
+    assert_eq!(requests[0].url, "http://localhost/info");
+    assert_eq!(requests[1].url, "http://localhost/exchange");
+    assert_eq!(requests[1].body["action"]["type"], "updateLeverage");
+    assert_eq!(requests[1].body["action"]["asset"], 0);
+    assert_eq!(requests[1].body["action"]["isCross"], true);
+    assert_eq!(requests[1].body["action"]["leverage"], 5);
+    assert_eq!(requests[2].body["action"]["type"], "order");
+}
+
+#[tokio::test]
 async fn live_executor_maps_server_errors_to_transient() {
     let client = std::sync::Arc::new(MockOrderHttpClient::default());
     client.push_response(OrderHttpResponse {

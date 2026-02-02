@@ -7,6 +7,7 @@ use tokio::sync::{Mutex, watch};
 use tokio::time::interval;
 use tracing::{info, warn};
 
+use crate::account::AccountBalanceSource;
 use crate::core::strategy::{StrategyBar, StrategyEngine, StrategyError, StrategyOutcome};
 use crate::data::{DataError, PriceFetcher};
 use crate::funding::FundingFetcher;
@@ -52,6 +53,7 @@ pub struct LiveRunner {
     engine: StrategyEngine,
     price_fetcher: PriceFetcher,
     funding_fetcher: Option<FundingFetcher>,
+    account_source: Option<Arc<dyn AccountBalanceSource>>,
     state_writer: Option<Arc<dyn StateWriter>>,
     stats_writer: Option<Arc<dyn BarLogWriter>>,
     trade_writer: Option<Arc<dyn TradeLogWriter>>,
@@ -68,6 +70,7 @@ impl LiveRunner {
             engine,
             price_fetcher,
             funding_fetcher,
+            account_source: None,
             state_writer: None,
             stats_writer: None,
             trade_writer: None,
@@ -82,6 +85,11 @@ impl LiveRunner {
 
     pub fn with_state_writer(mut self, writer: Arc<dyn StateWriter>) -> Self {
         self.state_writer = Some(writer);
+        self
+    }
+
+    pub fn with_account_source(mut self, source: Arc<dyn AccountBalanceSource>) -> Self {
+        self.account_source = Some(source);
         self
     }
 
@@ -121,10 +129,23 @@ impl LiveRunner {
             None
         };
 
+        let equity = if let Some(source) = &self.account_source {
+            match source.fetch_available_balance().await {
+                Ok(value) => Some(value),
+                Err(err) => {
+                    warn!(error = ?err, "account balance fetch failed; proceeding without equity");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         let bar = StrategyBar {
             timestamp: snapshot.timestamp,
             eth_price: snapshot.eth,
             btc_price: snapshot.btc,
+            equity,
             funding_eth: funding.as_ref().map(|value| value.eth.rate),
             funding_btc: funding.as_ref().map(|value| value.btc.rate),
             funding_interval_hours: funding.as_ref().map(|value| value.interval_hours),

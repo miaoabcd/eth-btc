@@ -6,7 +6,9 @@ use async_trait::async_trait;
 use rust_decimal_macros::dec;
 use tokio::sync::watch;
 
-use eth_btc_strategy::config::{Config, SigmaFloorMode, Symbol};
+use eth_btc_strategy::account::MockAccountSource;
+use eth_btc_strategy::config::{CapitalMode, Config, SigmaFloorMode, Symbol};
+use eth_btc_strategy::core::strategy::StrategyEngine;
 use eth_btc_strategy::data::{DataError, MockPriceSource, PriceBar, PriceFetcher};
 use eth_btc_strategy::execution::{ExecutionEngine, PaperOrderExecutor, RetryConfig};
 use eth_btc_strategy::funding::{FundingFetcher, FundingRate, MockFundingSource};
@@ -229,6 +231,57 @@ async fn runner_writes_trade_logs() {
     let logs = writer.logs();
     assert!(logs.iter().any(|log| matches!(log.event, eth_btc_strategy::logging::TradeEvent::Entry)));
     assert!(logs.iter().any(|log| matches!(log.event, eth_btc_strategy::logging::TradeEvent::Exit(_))));
+}
+
+#[tokio::test]
+async fn runner_uses_account_balance_for_equity_ratio() {
+    let timestamps = [
+        Utc.timestamp_opt(0, 0).unwrap(),
+        Utc.timestamp_opt(900, 0).unwrap(),
+        Utc.timestamp_opt(1800, 0).unwrap(),
+        Utc.timestamp_opt(2700, 0).unwrap(),
+    ];
+
+    let mut config = Config::default();
+    config.strategy.n_z = 3;
+    config.position.n_vol = 1;
+    config.strategy.entry_z = dec!(0.5);
+    config.strategy.sl_z = dec!(2.0);
+    config.position.c_mode = CapitalMode::EquityRatio;
+    config.position.equity_ratio_k = Some(dec!(0.1));
+    config.position.equity_value = Some(dec!(10000));
+
+    let mut price_source = MockPriceSource::default();
+    for (idx, ts) in timestamps.iter().enumerate() {
+        let (eth, btc) = match idx {
+            0 | 1 | 2 => (dec!(100), dec!(100)),
+            _ => (dec!(271.8281828), dec!(100)),
+        };
+        price_source.insert_bar(PriceBar::new(Symbol::EthPerp, *ts, Some(eth), None, None));
+        price_source.insert_bar(PriceBar::new(Symbol::BtcPerp, *ts, Some(btc), None, None));
+    }
+
+    let execution = ExecutionEngine::new(Arc::new(PaperOrderExecutor), RetryConfig::fast());
+    let engine = StrategyEngine::new(config.clone(), execution).expect("engine");
+    let price_fetcher = PriceFetcher::new(Arc::new(price_source), config.data.price_field);
+
+    let mut account_source = MockAccountSource::default();
+    for _ in 0..timestamps.len() {
+        account_source.push_response(Ok(dec!(1000)));
+    }
+    let account_source = Arc::new(account_source);
+
+    let mut runner = LiveRunner::new(engine, price_fetcher, None)
+        .with_account_source(account_source);
+
+    let mut last = None;
+    for ts in timestamps {
+        last = Some(runner.run_once_at(ts).await.unwrap());
+    }
+
+    let outcome = last.expect("expected outcome");
+    assert_eq!(outcome.bar_log.notional_eth, Some(dec!(50)));
+    assert_eq!(outcome.bar_log.notional_btc, Some(dec!(50)));
 }
 
 #[tokio::test]

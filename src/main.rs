@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -9,12 +10,14 @@ use tokio::sync::watch;
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
+use alloy_signer_local::PrivateKeySigner;
 use eth_btc_strategy::backtest::{
     BacktestEngine, export_equity_csv, export_metrics_json, export_trades_csv,
     load_backtest_bars,
 };
+use eth_btc_strategy::account::HyperliquidAccountSource;
 use eth_btc_strategy::cli::{Cli, Command};
-use eth_btc_strategy::config::load_config;
+use eth_btc_strategy::config::{CapitalMode, load_config};
 use eth_btc_strategy::core::strategy::StrategyEngine;
 use eth_btc_strategy::data::{HyperliquidPriceSource, PriceFetcher};
 use eth_btc_strategy::backtest::download::HyperliquidDownloader;
@@ -102,8 +105,11 @@ async fn main() -> anyhow::Result<()> {
         Some(FundingFetcher::new(Arc::new(source)))
     };
 
-    let execution = if paper {
-        ExecutionEngine::new(Arc::new(PaperOrderExecutor), RetryConfig::fast())
+    let (execution, account_source) = if paper {
+        (
+            ExecutionEngine::new(Arc::new(PaperOrderExecutor), RetryConfig::fast()),
+            None,
+        )
     } else {
         let private_key = cli
             .private_key
@@ -113,11 +119,35 @@ async fn main() -> anyhow::Result<()> {
             .vault_address
             .or_else(|| config.auth.vault_address.clone());
         let key = private_key.ok_or_else(|| anyhow!("missing Hyperliquid private key"))?;
+        let account_source = if matches!(config.position.c_mode, CapitalMode::EquityRatio) {
+            let user = if let Some(vault) = vault_address.clone() {
+                vault
+            } else {
+                let signer = PrivateKeySigner::from_str(key.trim_start_matches("0x"))
+                    .map_err(|err| anyhow!("invalid private key: {err}"))?;
+                signer.address().to_string()
+            };
+            Some(Arc::new(HyperliquidAccountSource::new(
+                base_url.clone(),
+                user,
+            )))
+        } else {
+            None
+        };
         let mut executor = LiveOrderExecutor::with_private_key(base_url.clone(), key);
         if let Some(vault) = vault_address {
             executor = executor.with_vault_address(vault);
         }
-        ExecutionEngine::new(Arc::new(executor), RetryConfig::fast())
+        if let Some(leverage) = config.execution.leverage {
+            executor = executor.with_leverage_config(
+                leverage,
+                config.execution.margin_mode.is_cross(),
+            );
+        }
+        (
+            ExecutionEngine::new(Arc::new(executor), RetryConfig::fast()),
+            account_source,
+        )
     };
     let mut engine = StrategyEngine::new(config.clone(), execution).context("create engine")?;
 
@@ -137,6 +167,9 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let mut runner = LiveRunner::new(engine, price_fetcher, funding_fetcher);
+    if let Some(source) = account_source {
+        runner = runner.with_account_source(source);
+    }
     if let Some(writer) = state_writer {
         runner = runner.with_state_writer(writer);
     }

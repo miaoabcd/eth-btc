@@ -15,6 +15,7 @@ fn bar(timestamp: i64, r: rust_decimal::Decimal) -> StrategyBar {
         timestamp: Utc.timestamp_opt(timestamp, 0).unwrap(),
         eth_price: eth,
         btc_price: base,
+        equity: None,
         funding_eth: None,
         funding_btc: None,
         funding_interval_hours: None,

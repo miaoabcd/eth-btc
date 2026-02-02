@@ -16,6 +16,7 @@ pub struct StrategyBar {
     pub timestamp: DateTime<Utc>,
     pub eth_price: Decimal,
     pub btc_price: Decimal,
+    pub equity: Option<Decimal>,
     pub funding_eth: Option<Decimal>,
     pub funding_btc: Option<Decimal>,
     pub funding_interval_hours: Option<u32>,
@@ -124,11 +125,17 @@ impl StrategyEngine {
         {
             let equity = match self.config.position.c_mode {
                 CapitalMode::FixedNotional => self.config.position.c_value.unwrap_or(Decimal::ZERO),
-                CapitalMode::EquityRatio => self.config.position.equity_value.ok_or_else(|| {
-                    StrategyError::Position(
-                        "position.equity_value required for equity ratio mode".to_string(),
-                    )
-                })?,
+                CapitalMode::EquityRatio => {
+                    if let Some(value) = bar.equity {
+                        value
+                    } else if let Some(value) = self.config.position.equity_value {
+                        value
+                    } else {
+                        return Err(StrategyError::Position(
+                            "equity unavailable for equity ratio mode".to_string(),
+                        ));
+                    }
+                }
             };
             let capital = compute_capital(&self.config.position, equity)
                 .map_err(|err| StrategyError::Position(err.to_string()))?;

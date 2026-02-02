@@ -30,7 +30,7 @@ ewma_half_life = 20
 c_mode = "FIXED_NOTIONAL"
 # fixed notional capital (required when c_mode=FIXED_NOTIONAL)
 c_value = 50000
-# equity value (required when c_mode=EQUITY_RATIO)
+# equity value (optional; used for paper/backtest or if live balance unavailable)
 # equity_value = 100000
 # equity ratio multiplier k (required when c_mode=EQUITY_RATIO)
 # equity_ratio_k = 0.1
@@ -70,6 +70,10 @@ price_field = "MID"
 order_type = "MARKET"
 # slippage in bps used for LIMIT pricing
 slippage_bps = 5
+# leverage (optional; if set will call updateLeverage before opening)
+# leverage = 3
+# margin mode: CROSS | ISOLATED
+margin_mode = "CROSS"
 
 [runtime]
 # Hyperliquid API base URL

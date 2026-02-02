@@ -173,6 +173,35 @@ impl FromStr for OrderType {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum MarginMode {
+    #[default]
+    Cross,
+    Isolated,
+}
+
+impl MarginMode {
+    pub fn is_cross(&self) -> bool {
+        matches!(self, MarginMode::Cross)
+    }
+}
+
+impl FromStr for MarginMode {
+    type Err = ConfigError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_uppercase().as_str() {
+            "CROSS" => Ok(MarginMode::Cross),
+            "ISOLATED" => Ok(MarginMode::Isolated),
+            _ => Err(ConfigError::InvalidValue {
+                field: "execution.margin_mode",
+                message: format!("unsupported margin mode: {value}"),
+            }),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum LogFormat {
     #[default]
     Json,
@@ -339,6 +368,8 @@ impl Default for DataConfig {
 pub struct ExecutionConfig {
     pub order_type: OrderType,
     pub slippage_bps: u32,
+    pub leverage: Option<u32>,
+    pub margin_mode: MarginMode,
 }
 
 impl Default for ExecutionConfig {
@@ -346,6 +377,8 @@ impl Default for ExecutionConfig {
         Self {
             order_type: OrderType::Market,
             slippage_bps: 5,
+            leverage: None,
+            margin_mode: MarginMode::Cross,
         }
     }
 }
@@ -562,11 +595,6 @@ impl Config {
                     field: "position.equity_ratio_k",
                 });
             }
-            CapitalMode::EquityRatio if self.position.equity_value.is_none() => {
-                return Err(ConfigError::MissingValue {
-                    field: "position.equity_value",
-                });
-            }
             _ => {}
         }
         if let Some(max_notional) = self.position.max_notional
@@ -589,6 +617,14 @@ impl Config {
             return Err(ConfigError::InvalidValue {
                 field: "funding.c_min_ratio",
                 message: "must be between 0 and 1".to_string(),
+            });
+        }
+        if let Some(leverage) = self.execution.leverage
+            && leverage == 0
+        {
+            return Err(ConfigError::InvalidValue {
+                field: "execution.leverage",
+                message: "must be > 0".to_string(),
             });
         }
         if self.runtime.base_url.trim().is_empty() {
@@ -756,6 +792,12 @@ impl Config {
         }
         if let Some(value) = overrides.execution.slippage_bps {
             self.execution.slippage_bps = value;
+        }
+        if let Some(value) = overrides.execution.leverage {
+            self.execution.leverage = Some(value);
+        }
+        if let Some(value) = overrides.execution.margin_mode {
+            self.execution.margin_mode = value;
         }
         if let Some(value) = overrides.runtime.base_url {
             self.runtime.base_url = value;
@@ -931,6 +973,8 @@ pub struct DataOverrides {
 pub struct ExecutionOverrides {
     pub order_type: Option<OrderType>,
     pub slippage_bps: Option<u32>,
+    pub leverage: Option<u32>,
+    pub margin_mode: Option<MarginMode>,
 }
 
 #[derive(Debug, Default, Deserialize)]

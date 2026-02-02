@@ -96,6 +96,7 @@ async fn strategy_engine_uses_bar_funding_interval() {
             timestamp: Utc.timestamp_opt(offset, 0).unwrap(),
             eth_price: dec!(100),
             btc_price: dec!(100),
+            equity: None,
             funding_eth: None,
             funding_btc: None,
             funding_interval_hours: Some(1),
@@ -107,6 +108,7 @@ async fn strategy_engine_uses_bar_funding_interval() {
         timestamp: Utc.timestamp_opt(2700, 0).unwrap(),
         eth_price: dec!(271.8281828),
         btc_price: dec!(100),
+        equity: None,
         funding_eth: Some(dec!(0.001)),
         funding_btc: Some(dec!(0.01)),
         funding_interval_hours: Some(1),
@@ -137,7 +139,7 @@ async fn strategy_engine_uses_bar_funding_interval() {
 }
 
 #[tokio::test]
-async fn strategy_engine_uses_equity_value_for_equity_ratio() {
+async fn strategy_engine_uses_bar_equity_for_equity_ratio() {
     let mut config = Config::default();
     config.strategy.n_z = 3;
     config.position.n_vol = 1;
@@ -146,7 +148,7 @@ async fn strategy_engine_uses_equity_value_for_equity_ratio() {
     config.position.c_mode = CapitalMode::EquityRatio;
     config.position.equity_ratio_k = Some(dec!(0.1));
     config.position.c_value = Some(dec!(100));
-    config.position.equity_value = Some(dec!(1000));
+    config.position.equity_value = Some(dec!(10000));
 
     let execution =
         ExecutionEngine::new(std::sync::Arc::new(PaperOrderExecutor), RetryConfig::fast());
@@ -157,6 +159,7 @@ async fn strategy_engine_uses_equity_value_for_equity_ratio() {
             timestamp: Utc.timestamp_opt(offset, 0).unwrap(),
             eth_price: dec!(100),
             btc_price: dec!(100),
+            equity: None,
             funding_eth: None,
             funding_btc: None,
             funding_interval_hours: None,
@@ -170,6 +173,7 @@ async fn strategy_engine_uses_equity_value_for_equity_ratio() {
         timestamp: Utc.timestamp_opt(2700, 0).unwrap(),
         eth_price,
         btc_price,
+        equity: Some(dec!(1000)),
         funding_eth: None,
         funding_btc: None,
         funding_interval_hours: None,
@@ -200,6 +204,7 @@ async fn strategy_engine_enforces_max_notional_limit() {
             timestamp: Utc.timestamp_opt(offset, 0).unwrap(),
             eth_price: dec!(100),
             btc_price: dec!(100),
+            equity: None,
             funding_eth: None,
             funding_btc: None,
             funding_interval_hours: None,
@@ -213,6 +218,7 @@ async fn strategy_engine_enforces_max_notional_limit() {
         timestamp: Utc.timestamp_opt(2700, 0).unwrap(),
         eth_price,
         btc_price,
+        equity: None,
         funding_eth: None,
         funding_btc: None,
         funding_interval_hours: None,
@@ -241,6 +247,7 @@ async fn strategy_engine_sets_limit_price_with_slippage() {
             timestamp: Utc.timestamp_opt(offset, 0).unwrap(),
             eth_price: dec!(100),
             btc_price: dec!(100),
+            equity: None,
             funding_eth: None,
             funding_btc: None,
             funding_interval_hours: None,
@@ -254,6 +261,7 @@ async fn strategy_engine_sets_limit_price_with_slippage() {
         timestamp: Utc.timestamp_opt(2700, 0).unwrap(),
         eth_price,
         btc_price,
+        equity: None,
         funding_eth: None,
         funding_btc: None,
         funding_interval_hours: None,
@@ -294,6 +302,7 @@ async fn strategy_engine_emits_trade_logs_on_entry_and_exit() {
             timestamp: Utc.timestamp_opt(offset, 0).unwrap(),
             eth_price: dec!(100),
             btc_price: dec!(100),
+            equity: None,
             funding_eth: None,
             funding_btc: None,
             funding_interval_hours: None,
@@ -305,6 +314,7 @@ async fn strategy_engine_emits_trade_logs_on_entry_and_exit() {
         timestamp: Utc.timestamp_opt(2700, 0).unwrap(),
         eth_price: dec!(271.8281828),
         btc_price: dec!(100),
+        equity: None,
         funding_eth: None,
         funding_btc: None,
         funding_interval_hours: None,
@@ -322,6 +332,7 @@ async fn strategy_engine_emits_trade_logs_on_entry_and_exit() {
         timestamp: Utc.timestamp_opt(3600, 0).unwrap(),
         eth_price: dec!(164.872127),
         btc_price: dec!(100),
+        equity: None,
         funding_eth: None,
         funding_btc: None,
         funding_interval_hours: None,

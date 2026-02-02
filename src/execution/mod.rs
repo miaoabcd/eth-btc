@@ -203,6 +203,13 @@ enum HyperliquidExchangeAction {
         #[serde(default)]
         grouping: HyperliquidOrderGrouping,
     },
+    #[serde(rename = "updateLeverage")]
+    UpdateLeverage {
+        asset: u32,
+        #[serde(rename = "isCross")]
+        is_cross: bool,
+        leverage: u32,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -276,6 +283,16 @@ impl HyperliquidExecResponse {
             )),
         }
     }
+
+    fn ensure_ok(self) -> Result<(), ExecutionError> {
+        if self.status != "ok" {
+            return Err(ExecutionError::Fatal(format!(
+                "exchange response status {}",
+                self.status
+            )));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -283,6 +300,11 @@ impl HyperliquidExecResponse {
 enum HyperliquidExecResponseData {
     #[serde(rename = "order")]
     Order { data: HyperliquidExecOrderResponseData },
+    #[serde(rename = "updateLeverage")]
+    UpdateLeverage {
+        #[allow(dead_code)]
+        data: serde_json::Value,
+    },
     #[serde(other)]
     Unknown,
 }
@@ -413,6 +435,8 @@ pub struct LiveOrderExecutor {
     nonce_provider: Arc<dyn NonceProvider>,
     vault_address: Option<String>,
     is_testnet: bool,
+    leverage: Option<u32>,
+    is_cross: bool,
 }
 
 impl LiveOrderExecutor {
@@ -456,6 +480,8 @@ impl LiveOrderExecutor {
             nonce_provider: Arc::new(TimeNonceProvider::new()),
             vault_address: None,
             is_testnet,
+            leverage: None,
+            is_cross: true,
         }
     }
 
@@ -477,6 +503,12 @@ impl LiveOrderExecutor {
 
     pub fn with_vault_address(mut self, vault_address: String) -> Self {
         self.vault_address = Some(vault_address);
+        self
+    }
+
+    pub fn with_leverage_config(mut self, leverage: u32, is_cross: bool) -> Self {
+        self.leverage = Some(leverage);
+        self.is_cross = is_cross;
         self
     }
 
@@ -563,6 +595,12 @@ impl LiveOrderExecutor {
         order: &OrderRequest,
         reduce_only: bool,
     ) -> Result<Decimal, ExecutionError> {
+        if !reduce_only {
+            if let Some(leverage) = self.leverage {
+                self.update_leverage(order.symbol, leverage, self.is_cross)
+                    .await?;
+            }
+        }
         self.rate_limiter.wait().await;
         let spec = self.asset_spec(order.symbol).await?;
         let price = order.limit_price.ok_or_else(|| {
@@ -616,6 +654,52 @@ impl LiveOrderExecutor {
         let parsed: HyperliquidExecResponse = serde_json::from_str(&response.body)
             .map_err(|err| ExecutionError::Fatal(err.to_string()))?;
         parsed.filled_qty()
+    }
+
+    async fn update_leverage(
+        &self,
+        symbol: Symbol,
+        leverage: u32,
+        is_cross: bool,
+    ) -> Result<(), ExecutionError> {
+        self.rate_limiter.wait().await;
+        let spec = self.asset_spec(symbol).await?;
+        let action = HyperliquidExchangeAction::UpdateLeverage {
+            asset: spec.asset_id,
+            is_cross,
+            leverage,
+        };
+        let signer = self.signer.as_ref().ok_or_else(|| {
+            ExecutionError::Fatal("missing Hyperliquid private key".to_string())
+        })?;
+        let nonce = self.nonce_provider.next_nonce();
+        let signature =
+            signer.sign(&action, nonce, self.is_testnet, self.vault_address.as_deref())?;
+        let payload = HyperliquidExchangeRequest {
+            action,
+            nonce,
+            signature,
+            vault_address: self.vault_address.clone(),
+            expires_after: None,
+        };
+        let body =
+            serde_json::to_value(payload).map_err(|err| ExecutionError::Fatal(err.to_string()))?;
+        let response = self.client.post(&self.exchange_url(), body).await?;
+        if response.status >= 500 {
+            return Err(ExecutionError::Transient(format!(
+                "server error {status}",
+                status = response.status
+            )));
+        }
+        if response.status >= 400 {
+            return Err(ExecutionError::Fatal(format!(
+                "client error {status}",
+                status = response.status
+            )));
+        }
+        let parsed: HyperliquidExecResponse = serde_json::from_str(&response.body)
+            .map_err(|err| ExecutionError::Fatal(err.to_string()))?;
+        parsed.ensure_ok()
     }
 }
 

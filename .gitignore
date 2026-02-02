@@ -18,6 +18,8 @@ AGENTS.md
 Cargo.lock
 .tmp/
 
+scripts/liblink_fallback.so
+
 
 # Added by cargo
 
@@ -26,7 +28,3 @@ Cargo.lock
 review.md
 config.toml
 config.toml.local
-
-*.log
-
-data/
