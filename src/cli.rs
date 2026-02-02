@@ -1,6 +1,10 @@
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
+use rust_decimal::Decimal;
+
+use crate::config::Symbol;
+use crate::execution::OrderSide;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -36,6 +40,7 @@ pub struct Cli {
 pub enum Command {
     Backtest(BacktestArgs),
     Download(DownloadArgs),
+    OrderTest(OrderTestArgs),
 }
 
 #[derive(Debug, Args)]
@@ -54,4 +59,18 @@ pub struct DownloadArgs {
     pub end: String,
     #[arg(long, value_name = "PATH")]
     pub output: PathBuf,
+}
+
+#[derive(Debug, Args)]
+pub struct OrderTestArgs {
+    #[arg(long, value_name = "SYMBOL")]
+    pub symbol: Symbol,
+    #[arg(long, value_name = "SIDE")]
+    pub side: OrderSide,
+    #[arg(long, value_name = "QTY")]
+    pub qty: Decimal,
+    #[arg(long, value_name = "PRICE")]
+    pub limit_price: Decimal,
+    #[arg(long)]
+    pub reduce_only: bool,
 }

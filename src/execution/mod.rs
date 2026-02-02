@@ -37,6 +37,20 @@ impl OrderSide {
     }
 }
 
+impl FromStr for OrderSide {
+    type Err = ExecutionError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_uppercase().as_str() {
+            "BUY" => Ok(OrderSide::Buy),
+            "SELL" => Ok(OrderSide::Sell),
+            _ => Err(ExecutionError::Fatal(format!(
+                "unsupported order side: {value}"
+            ))),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct OrderRequest {
     pub symbol: Symbol,

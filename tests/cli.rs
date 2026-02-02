@@ -1,6 +1,9 @@
 use clap::Parser;
+use rust_decimal_macros::dec;
 
 use eth_btc_strategy::cli::{Cli, Command};
+use eth_btc_strategy::config::Symbol;
+use eth_btc_strategy::execution::OrderSide;
 
 #[test]
 fn cli_parses_runtime_flags() {
@@ -73,6 +76,35 @@ fn cli_parses_download_subcommand() {
             assert_eq!(args.start, "2024-01-01T00:00:00Z");
             assert_eq!(args.end, "2024-01-01T01:00:00Z");
             assert_eq!(args.output.to_str().unwrap(), "bars.json");
+        }
+        other => panic!("unexpected command {other:?}"),
+    }
+}
+
+#[test]
+fn cli_parses_order_test_subcommand() {
+    let cli = Cli::try_parse_from([
+        "bin",
+        "order-test",
+        "--symbol",
+        "ETH-PERP",
+        "--side",
+        "BUY",
+        "--qty",
+        "0.01",
+        "--limit-price",
+        "1000",
+        "--reduce-only",
+    ])
+    .unwrap();
+
+    match cli.command {
+        Some(Command::OrderTest(args)) => {
+            assert_eq!(args.symbol, Symbol::EthPerp);
+            assert_eq!(args.side, OrderSide::Buy);
+            assert_eq!(args.qty, dec!(0.01));
+            assert_eq!(args.limit_price, dec!(1000));
+            assert!(args.reduce_only);
         }
         other => panic!("unexpected command {other:?}"),
     }

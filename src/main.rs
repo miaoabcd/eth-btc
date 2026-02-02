@@ -22,7 +22,8 @@ use eth_btc_strategy::core::strategy::StrategyEngine;
 use eth_btc_strategy::data::{HyperliquidPriceSource, PriceFetcher};
 use eth_btc_strategy::backtest::download::HyperliquidDownloader;
 use eth_btc_strategy::execution::{
-    ExecutionEngine, LiveOrderExecutor, PaperOrderExecutor, RetryConfig,
+    ExecutionEngine, LiveOrderExecutor, OrderExecutor, OrderRequest, PaperOrderExecutor,
+    RetryConfig,
 };
 use eth_btc_strategy::funding::{FundingFetcher, HyperliquidFundingSource};
 use eth_btc_strategy::logging::{BarLogFileWriter, TradeLogFileWriter};
@@ -90,6 +91,44 @@ async fn main() -> anyhow::Result<()> {
                     serde_json::to_string_pretty(&bars).context("serialize backtest bars")?;
                 std::fs::write(&args.output, payload).context("write output file")?;
                 info!(count = bars.len(), path = %args.output.display(), "download complete");
+                return Ok(());
+            }
+            Command::OrderTest(args) => {
+                if paper {
+                    return Err(anyhow!("order-test does not support paper mode"));
+                }
+                let private_key = cli
+                    .private_key
+                    .or(cli.api_key)
+                    .or_else(|| config.auth.private_key.clone());
+                let vault_address = cli
+                    .vault_address
+                    .or_else(|| config.auth.vault_address.clone());
+                let key = private_key.ok_or_else(|| anyhow!("missing Hyperliquid private key"))?;
+                let mut executor = LiveOrderExecutor::with_private_key(base_url.clone(), key);
+                if let Some(vault) = vault_address {
+                    executor = executor.with_vault_address(vault);
+                }
+                if let Some(leverage) = config.execution.leverage {
+                    executor = executor.with_leverage_config(
+                        leverage,
+                        config.execution.margin_mode.is_cross(),
+                    );
+                }
+                let order = OrderRequest {
+                    symbol: args.symbol,
+                    side: args.side,
+                    qty: args.qty,
+                    order_type: config.execution.order_type,
+                    limit_price: Some(args.limit_price),
+                };
+                let filled = if args.reduce_only {
+                    executor.close(&order).await.context("close test order")?
+                } else {
+                    executor.submit(&order).await.context("submit test order")?
+                };
+                info!(filled = %filled, "order-test complete");
+                println!("{filled}");
                 return Ok(());
             }
         }
