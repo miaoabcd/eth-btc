@@ -73,4 +73,6 @@ pub struct OrderTestArgs {
     pub limit_price: Decimal,
     #[arg(long)]
     pub reduce_only: bool,
+    #[arg(long)]
+    pub dry_run: bool,
 }

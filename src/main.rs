@@ -94,6 +94,20 @@ async fn main() -> anyhow::Result<()> {
                 return Ok(());
             }
             Command::OrderTest(args) => {
+                if args.dry_run {
+                    let payload = serde_json::json!({
+                        "symbol": args.symbol,
+                        "side": args.side,
+                        "qty": args.qty,
+                        "limit_price": args.limit_price,
+                        "reduce_only": args.reduce_only,
+                        "base_url": base_url,
+                    });
+                    let pretty =
+                        serde_json::to_string_pretty(&payload).context("format dry-run")?;
+                    println!("{pretty}");
+                    return Ok(());
+                }
                 if paper {
                     return Err(anyhow!("order-test does not support paper mode"));
                 }

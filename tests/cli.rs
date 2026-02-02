@@ -95,6 +95,7 @@ fn cli_parses_order_test_subcommand() {
         "--limit-price",
         "1000",
         "--reduce-only",
+        "--dry-run",
     ])
     .unwrap();
 
@@ -105,6 +106,7 @@ fn cli_parses_order_test_subcommand() {
             assert_eq!(args.qty, dec!(0.01));
             assert_eq!(args.limit_price, dec!(1000));
             assert!(args.reduce_only);
+            assert!(args.dry_run);
         }
         other => panic!("unexpected command {other:?}"),
     }

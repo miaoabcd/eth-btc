@@ -115,6 +115,20 @@ cargo run --release -- \
   --vault-address 0xVAULT
 ```
 
+### Order test (single IOC order)
+
+Use `order-test` to validate signing + exchange connectivity without running the full strategy.
+
+```bash
+cargo run --release -- order-test \
+  --symbol ETH-PERP \
+  --side BUY \
+  --qty 0.01 \
+  --limit-price 1000
+```
+
+Add `--reduce-only` to send a reduce-only close, or `--dry-run` to print the order payload without submitting.
+
 ### Useful flags
 
 - `--base-url`: Hyperliquid API base URL (default: `https://api.hyperliquid.xyz`)
