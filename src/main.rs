@@ -13,7 +13,7 @@ use tracing_subscriber::EnvFilter;
 use alloy_signer_local::PrivateKeySigner;
 use eth_btc_strategy::backtest::{
     BacktestEngine, export_equity_csv, export_metrics_json, export_trades_csv,
-    load_backtest_bars,
+    load_backtest_bars, load_backtest_bars_from_db,
 };
 use eth_btc_strategy::account::HyperliquidAccountSource;
 use eth_btc_strategy::cli::{Cli, Command};
@@ -62,7 +62,24 @@ async fn main() -> anyhow::Result<()> {
     if let Some(command) = &cli.command {
         match command {
             Command::Backtest(args) => {
-                let bars = load_backtest_bars(&args.bars).context("load backtest bars")?;
+                let bars = if let Some(db) = args.db.as_ref() {
+                    let start = args
+                        .start
+                        .as_ref()
+                        .ok_or_else(|| anyhow!("--start required when --db is set"))?;
+                    let end = args
+                        .end
+                        .as_ref()
+                        .ok_or_else(|| anyhow!("--end required when --db is set"))?;
+                    let start = parse_rfc3339(start).context("parse --start")?;
+                    let end = parse_rfc3339(end).context("parse --end")?;
+                    load_backtest_bars_from_db(db, start, end, config.data.price_field)
+                        .context("load backtest bars from db")?
+                } else if let Some(bars_path) = args.bars.as_ref() {
+                    load_backtest_bars(bars_path).context("load backtest bars")?
+                } else {
+                    return Err(anyhow!("--bars or --db is required for backtest"));
+                };
                 let engine = BacktestEngine::new(config);
                 let result = engine.run(&bars).context("run backtest")?;
                 if let Some(dir) = args.output_dir.as_ref() {

@@ -10,7 +10,7 @@ use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::config::{Config, Symbol};
+use crate::config::{Config, PriceField, Symbol};
 use crate::core::{ExitReason, TradeDirection};
 use crate::core::pipeline::SignalPipeline;
 use crate::funding::{FundingRate, estimate_funding_cost};
@@ -19,6 +19,8 @@ use crate::position::{
     MinSizePolicy, PositionError, SizeConverter, compute_capital, risk_parity_weights,
 };
 use crate::state::{PositionLeg, PositionSnapshot, StateMachine};
+use crate::storage::PriceStore;
+use crate::data::align_to_bar_close;
 
 #[derive(Debug, Error)]
 pub enum BacktestError {
@@ -28,13 +30,15 @@ pub enum BacktestError {
     Position(String),
     #[error("funding error: {0}")]
     Funding(String),
+    #[error("storage error: {0}")]
+    Storage(String),
     #[error("io error: {0}")]
     Io(String),
     #[error("serialization error: {0}")]
     Serialization(String),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BacktestBar {
     pub timestamp: DateTime<Utc>,
     pub eth_price: Decimal,
@@ -619,6 +623,67 @@ pub fn export_metrics_json(path: &Path, metrics: &Metrics) -> Result<(), Backtes
 pub fn load_backtest_bars(path: &Path) -> Result<Vec<BacktestBar>, BacktestError> {
     let payload = fs::read_to_string(path).map_err(|err| BacktestError::Io(err.to_string()))?;
     serde_json::from_str(&payload).map_err(|err| BacktestError::Serialization(err.to_string()))
+}
+
+pub fn load_backtest_bars_from_db(
+    path: &Path,
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    price_field: PriceField,
+) -> Result<Vec<BacktestBar>, BacktestError> {
+    let start = align_to_bar_close(start)
+        .map_err(|err| BacktestError::Storage(err.to_string()))?;
+    let end = align_to_bar_close(end).map_err(|err| BacktestError::Storage(err.to_string()))?;
+    let store = PriceStore::new(path.to_string_lossy().as_ref())
+        .map_err(|err| BacktestError::Storage(err.to_string()))?;
+    let records = store
+        .load_range(start, end)
+        .map_err(|err| BacktestError::Storage(err.to_string()))?;
+    let first = records.first().map(|record| record.timestamp);
+    let last = records.last().map(|record| record.timestamp);
+    if first.map(|ts| ts > start).unwrap_or(true) || last.map(|ts| ts < end).unwrap_or(true) {
+        return Err(BacktestError::Storage(format!(
+            "incomplete coverage: start {start} end {end} first {first:?} last {last:?}"
+        )));
+    }
+    let mut bars = Vec::new();
+    for record in records {
+        let eth_price = effective_price(
+            price_field,
+            record.eth_mid,
+            record.eth_mark,
+            record.eth_close,
+        )
+        .ok_or_else(|| BacktestError::Storage("missing ETH price".to_string()))?;
+        let btc_price = effective_price(
+            price_field,
+            record.btc_mid,
+            record.btc_mark,
+            record.btc_close,
+        )
+        .ok_or_else(|| BacktestError::Storage("missing BTC price".to_string()))?;
+        bars.push(BacktestBar {
+            timestamp: record.timestamp,
+            eth_price,
+            btc_price,
+            funding_eth: record.funding_eth,
+            funding_btc: record.funding_btc,
+        });
+    }
+    Ok(bars)
+}
+
+fn effective_price(
+    field: PriceField,
+    mid: Option<Decimal>,
+    mark: Option<Decimal>,
+    close: Option<Decimal>,
+) -> Option<Decimal> {
+    match field {
+        PriceField::Mid => mid.or(mark).or(close),
+        PriceField::Mark => mark.or(mid).or(close),
+        PriceField::Close => close.or(mid).or(mark),
+    }
 }
 
 pub fn export_trades_csv(path: &Path, trades: &[Trade]) -> Result<(), BacktestError> {

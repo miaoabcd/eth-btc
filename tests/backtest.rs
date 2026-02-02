@@ -2,6 +2,8 @@
 mod breakdown;
 #[path = "backtest/download.rs"]
 mod download;
+#[path = "backtest/db.rs"]
+mod db;
 #[path = "backtest/engine.rs"]
 mod engine;
 #[path = "backtest/export.rs"]

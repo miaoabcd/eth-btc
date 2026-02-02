@@ -107,6 +107,47 @@ impl PriceStore {
             Some(row) => row,
             None => return Ok(None),
         };
+        Ok(Some(Self::row_to_record(&row)?))
+    }
+
+    pub fn load_range(
+        &self,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> Result<Vec<PriceBarRecord>, PriceStoreError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT timestamp, eth_mid, eth_mark, eth_close, btc_mid, btc_mark, btc_close, funding_eth, funding_btc, funding_interval_hours FROM price_bars WHERE timestamp >= ? AND timestamp <= ? ORDER BY timestamp",
+            )
+            .map_err(|err| PriceStoreError::Persistence(err.to_string()))?;
+        let mut rows = stmt
+            .query([start.to_rfc3339(), end.to_rfc3339()])
+            .map_err(|err| PriceStoreError::Persistence(err.to_string()))?;
+        let mut records = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .map_err(|err| PriceStoreError::Persistence(err.to_string()))?
+        {
+            records.push(Self::row_to_record(&row)?);
+        }
+        Ok(records)
+    }
+
+    fn decimal_to_string(value: Option<Decimal>) -> Option<String> {
+        value.map(|value| value.to_string())
+    }
+
+    fn string_to_decimal(value: Option<String>) -> Result<Option<Decimal>, PriceStoreError> {
+        match value {
+            Some(value) => Decimal::from_str(&value)
+                .map(Some)
+                .map_err(|err| PriceStoreError::Parse(err.to_string())),
+            None => Ok(None),
+        }
+    }
+
+    fn row_to_record(row: &rusqlite::Row<'_>) -> Result<PriceBarRecord, PriceStoreError> {
         let timestamp: String = row
             .get(0)
             .map_err(|err| PriceStoreError::Persistence(err.to_string()))?;
@@ -141,7 +182,7 @@ impl PriceStore {
             .get(9)
             .map_err(|err| PriceStoreError::Persistence(err.to_string()))?;
 
-        Ok(Some(PriceBarRecord {
+        Ok(PriceBarRecord {
             timestamp,
             eth_mid: Self::string_to_decimal(eth_mid)?,
             eth_mark: Self::string_to_decimal(eth_mark)?,
@@ -152,20 +193,7 @@ impl PriceStore {
             funding_eth: Self::string_to_decimal(funding_eth)?,
             funding_btc: Self::string_to_decimal(funding_btc)?,
             funding_interval_hours: funding_interval_hours.map(|value| value as u32),
-        }))
-    }
-
-    fn decimal_to_string(value: Option<Decimal>) -> Option<String> {
-        value.map(|value| value.to_string())
-    }
-
-    fn string_to_decimal(value: Option<String>) -> Result<Option<Decimal>, PriceStoreError> {
-        match value {
-            Some(value) => Decimal::from_str(&value)
-                .map(Some)
-                .map_err(|err| PriceStoreError::Parse(err.to_string())),
-            None => Ok(None),
-        }
+        })
     }
 }
 

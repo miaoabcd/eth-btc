@@ -50,7 +50,7 @@ fn cli_parses_backtest_subcommand() {
 
     match cli.command {
         Some(Command::Backtest(args)) => {
-            assert_eq!(args.bars.to_str().unwrap(), "bars.json");
+            assert_eq!(args.bars.unwrap().to_str().unwrap(), "bars.json");
             assert_eq!(args.output_dir.unwrap().to_str().unwrap(), "out");
         }
         other => panic!("unexpected command {other:?}"),
@@ -76,6 +76,33 @@ fn cli_parses_download_subcommand() {
             assert_eq!(args.start, "2024-01-01T00:00:00Z");
             assert_eq!(args.end, "2024-01-01T01:00:00Z");
             assert_eq!(args.output.to_str().unwrap(), "bars.json");
+        }
+        other => panic!("unexpected command {other:?}"),
+    }
+}
+
+#[test]
+fn cli_parses_backtest_db_subcommand() {
+    let cli = Cli::try_parse_from([
+        "bin",
+        "backtest",
+        "--db",
+        "prices.sqlite",
+        "--start",
+        "2024-01-01T00:00:00Z",
+        "--end",
+        "2024-01-02T00:00:00Z",
+        "--output-dir",
+        "out",
+    ])
+    .unwrap();
+
+    match cli.command {
+        Some(Command::Backtest(args)) => {
+            assert_eq!(args.db.unwrap().to_str().unwrap(), "prices.sqlite");
+            assert_eq!(args.start.unwrap(), "2024-01-01T00:00:00Z");
+            assert_eq!(args.end.unwrap(), "2024-01-02T00:00:00Z");
+            assert_eq!(args.output_dir.unwrap().to_str().unwrap(), "out");
         }
         other => panic!("unexpected command {other:?}"),
     }

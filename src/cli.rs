@@ -46,7 +46,13 @@ pub enum Command {
 #[derive(Debug, Args)]
 pub struct BacktestArgs {
     #[arg(long, value_name = "PATH")]
-    pub bars: PathBuf,
+    pub bars: Option<PathBuf>,
+    #[arg(long, value_name = "PATH")]
+    pub db: Option<PathBuf>,
+    #[arg(long, value_name = "RFC3339")]
+    pub start: Option<String>,
+    #[arg(long, value_name = "RFC3339")]
+    pub end: Option<String>,
     #[arg(long, value_name = "DIR")]
     pub output_dir: Option<PathBuf>,
 }
