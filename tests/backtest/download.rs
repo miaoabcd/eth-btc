@@ -6,7 +6,7 @@ use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde_json::json;
 
-use eth_btc_strategy::backtest::download::HyperliquidDownloader;
+use eth_btc_strategy::backtest::download::{DownloadError, HyperliquidDownloader};
 use eth_btc_strategy::data::{DataError, HttpClient, HttpResponse};
 
 #[derive(Clone)]
@@ -81,4 +81,23 @@ async fn download_merges_eth_and_btc_candles() {
     assert_eq!(bars[1].timestamp, ts2);
     assert_eq!(bars[1].eth_price, dec!(2310));
     assert_eq!(bars[1].btc_price, dec!(42100));
+}
+
+#[tokio::test]
+async fn download_errors_on_incomplete_coverage() {
+    let ts1 = Utc.with_ymd_and_hms(2024, 1, 1, 0, 15, 0).unwrap();
+    let ts2 = Utc.with_ymd_and_hms(2024, 1, 1, 0, 30, 0).unwrap();
+
+    let eth_payload = candle_payload(&[(ts2.timestamp_millis(), dec!(2300))]);
+    let btc_payload = candle_payload(&[(ts2.timestamp_millis(), dec!(42000))]);
+
+    let mut responses = HashMap::new();
+    responses.insert("ETH".to_string(), eth_payload);
+    responses.insert("BTC".to_string(), btc_payload);
+
+    let http = Arc::new(MockHttpClient::new(responses));
+    let downloader = HyperliquidDownloader::with_client("http://localhost", http);
+
+    let err = downloader.fetch_backtest_bars(ts1, ts2).await.unwrap_err();
+    assert!(matches!(err, DownloadError::Coverage { .. }));
 }

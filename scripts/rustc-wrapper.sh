@@ -12,9 +12,13 @@ lib_path="${script_dir}/liblink_fallback.so"
 src_path="${script_dir}/link_fallback.c"
 lock_dir="${script_dir}/.link_fallback.lock"
 
-if [[ ! -f "$lib_path" ]]; then
+needs_build() {
+  [[ ! -f "$lib_path" || "$src_path" -nt "$lib_path" ]]
+}
+
+if needs_build; then
   if mkdir "$lock_dir" 2>/dev/null; then
-    if [[ ! -f "$lib_path" ]]; then
+    if needs_build; then
       if ! command -v gcc >/dev/null 2>&1; then
         echo "rustc-wrapper: gcc required to build link fallback library" >&2
         rmdir "$lock_dir" 2>/dev/null || true
@@ -24,7 +28,7 @@ if [[ ! -f "$lib_path" ]]; then
     fi
     rmdir "$lock_dir" 2>/dev/null || true
   else
-    while [[ ! -f "$lib_path" ]]; do
+    while needs_build; do
       sleep 0.05
     done
   fi

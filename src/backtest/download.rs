@@ -7,7 +7,9 @@ use thiserror::Error;
 
 use crate::backtest::BacktestBar;
 use crate::config::Symbol;
-use crate::data::{DataError, HttpClient, HyperliquidPriceSource, PriceBar, PriceSource};
+use crate::data::{
+    DataError, HttpClient, HyperliquidPriceSource, PriceBar, PriceSource, align_to_bar_close,
+};
 
 #[derive(Debug, Error)]
 pub enum DownloadError {
@@ -15,6 +17,13 @@ pub enum DownloadError {
     Data(#[from] DataError),
     #[error("missing price for {0}")]
     MissingPrice(String),
+    #[error("history coverage incomplete: start {start} end {end} first {first:?} last {last:?}")]
+    Coverage {
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+        first: Option<DateTime<Utc>>,
+        last: Option<DateTime<Utc>>,
+    },
 }
 
 #[derive(Clone)]
@@ -40,6 +49,8 @@ impl HyperliquidDownloader {
         start: DateTime<Utc>,
         end: DateTime<Utc>,
     ) -> Result<Vec<BacktestBar>, DownloadError> {
+        let start = align_to_bar_close(start)?;
+        let end = align_to_bar_close(end)?;
         let (eth_bars, btc_bars) = tokio::try_join!(
             self.source.fetch_history(Symbol::EthPerp, start, end),
             self.source.fetch_history(Symbol::BtcPerp, start, end),
@@ -59,6 +70,16 @@ impl HyperliquidDownloader {
                     funding_btc: None,
                 });
             }
+        }
+        let first = merged.first().map(|bar| bar.timestamp);
+        let last = merged.last().map(|bar| bar.timestamp);
+        if first.map(|ts| ts > start).unwrap_or(true) || last.map(|ts| ts < end).unwrap_or(true) {
+            return Err(DownloadError::Coverage {
+                start,
+                end,
+                first,
+                last,
+            });
         }
         Ok(merged)
     }

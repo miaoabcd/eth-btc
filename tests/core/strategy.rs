@@ -348,3 +348,47 @@ async fn strategy_engine_emits_trade_logs_on_entry_and_exit() {
         other => panic!("unexpected exit trade log {other:?}"),
     }
 }
+
+#[tokio::test]
+async fn strategy_engine_skips_entry_below_minimum_size() {
+    let mut config = Config::default();
+    config.strategy.n_z = 3;
+    config.position.n_vol = 1;
+    config.strategy.entry_z = dec!(0.5);
+    config.strategy.sl_z = dec!(2.0);
+    config.position.c_mode = CapitalMode::FixedNotional;
+    config.position.c_value = Some(dec!(1));
+
+    let recorder = std::sync::Arc::new(RecordingExecutor::default());
+    let execution = ExecutionEngine::new(recorder.clone(), RetryConfig::fast());
+    let mut engine = StrategyEngine::new(config, execution).unwrap();
+
+    for offset in [0, 900, 1800] {
+        let bar = eth_btc_strategy::core::strategy::StrategyBar {
+            timestamp: Utc.timestamp_opt(offset, 0).unwrap(),
+            eth_price: dec!(100),
+            btc_price: dec!(100),
+            equity: None,
+            funding_eth: None,
+            funding_btc: None,
+            funding_interval_hours: None,
+        };
+        engine.process_bar(bar).await.unwrap();
+    }
+
+    let entry_bar = eth_btc_strategy::core::strategy::StrategyBar {
+        timestamp: Utc.timestamp_opt(2700, 0).unwrap(),
+        eth_price: dec!(271.8281828),
+        btc_price: dec!(100),
+        equity: None,
+        funding_eth: None,
+        funding_btc: None,
+        funding_interval_hours: None,
+    };
+
+    let outcome = engine.process_bar(entry_bar).await.unwrap();
+    assert_eq!(outcome.state, StrategyStatus::Flat);
+    assert!(outcome.trade_logs.is_empty());
+    let submitted = recorder.submitted.lock().expect("submit lock");
+    assert!(submitted.is_empty());
+}

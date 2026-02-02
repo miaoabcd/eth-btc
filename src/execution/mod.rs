@@ -758,19 +758,16 @@ impl ExecutionEngine {
         eth_order: OrderRequest,
         btc_order: OrderRequest,
     ) -> Result<(), ExecutionError> {
-        let eth_result = self.retry_close(&eth_order).await;
-        if eth_result.is_err() {
-            return eth_result.map(|_| ());
-        }
+        let eth_fill = match self.retry_close(&eth_order).await {
+            Ok(fill) => fill,
+            Err(err) => return Err(err),
+        };
         let btc_result = self.retry_close(&btc_order).await;
         if let Err(err) = btc_result {
             let rollback_order = OrderRequest {
                 symbol: eth_order.symbol,
-                side: match eth_order.side {
-                    OrderSide::Buy => OrderSide::Sell,
-                    OrderSide::Sell => OrderSide::Buy,
-                },
-                qty: eth_order.qty,
+                side: OrderSide::close_for_qty(eth_fill),
+                qty: eth_fill.abs(),
                 order_type: eth_order.order_type,
                 limit_price: eth_order.limit_price,
             };

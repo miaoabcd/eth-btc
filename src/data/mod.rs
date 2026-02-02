@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -316,30 +316,53 @@ impl PriceSource for HyperliquidPriceSource {
         let (start, end) = Self::normalize_range(start, end)?;
         let url = self.endpoint_url();
         let interval_ms = 900_000i64;
-        let start_ms = start.timestamp_millis();
-        let end_ms = end.timestamp_millis() + interval_ms;
-        let body = serde_json::json!({
-            "type": "candleSnapshot",
-            "req": {
-                "coin": Self::symbol_string(symbol),
-                "interval": "15m",
-                "startTime": start_ms,
-                "endTime": end_ms,
+        let max_bars = 5_000i64;
+        let max_span_ms = interval_ms * (max_bars - 1);
+
+        let mut merged = BTreeMap::new();
+        let mut current_start = start;
+        while current_start <= end {
+            let segment_end = {
+                let candidate =
+                    current_start + chrono::Duration::milliseconds(max_span_ms);
+                if candidate < end {
+                    candidate
+                } else {
+                    end
+                }
+            };
+            let start_ms = current_start.timestamp_millis();
+            let end_ms = segment_end.timestamp_millis() + interval_ms;
+            let body = serde_json::json!({
+                "type": "candleSnapshot",
+                "req": {
+                    "coin": Self::symbol_string(symbol),
+                    "interval": "15m",
+                    "startTime": start_ms,
+                    "endTime": end_ms,
+                }
+            });
+            self.rate_limiter.wait().await;
+            let response = self.http.post(&url, body).await?;
+            match response.status {
+                200 => {
+                    let bars = self.parse_candles(symbol, &response.body)?;
+                    for bar in bars {
+                        if bar.timestamp >= current_start && bar.timestamp <= segment_end {
+                            merged.insert(bar.timestamp, bar);
+                        }
+                    }
+                }
+                429 => return Err(DataError::RateLimited),
+                status => {
+                    return Err(DataError::Http(format!("unexpected status {status}")));
+                }
             }
-        });
-        self.rate_limiter.wait().await;
-        let response = self.http.post(&url, body).await?;
-        match response.status {
-            200 => {
-                let bars = self.parse_candles(symbol, &response.body)?;
-                Ok(bars
-                    .into_iter()
-                    .filter(|bar| bar.timestamp >= start && bar.timestamp <= end)
-                    .collect())
-            }
-            429 => Err(DataError::RateLimited),
-            status => Err(DataError::Http(format!("unexpected status {status}"))),
+
+            current_start = segment_end + chrono::Duration::milliseconds(interval_ms);
         }
+
+        Ok(merged.into_values().collect())
     }
 }
 

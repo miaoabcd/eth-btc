@@ -29,6 +29,25 @@ impl HttpClient for TestHttpClient {
 }
 
 #[derive(Debug, Clone)]
+struct SequencedHttpClient {
+    expected_url: String,
+    expected_bodies: Vec<serde_json::Value>,
+    responses: Vec<HttpResponse>,
+    calls: Arc<AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl HttpClient for SequencedHttpClient {
+    async fn post(&self, url: &str, body: serde_json::Value) -> Result<HttpResponse, DataError> {
+        let index = self.calls.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(url, self.expected_url);
+        assert!(index < self.expected_bodies.len());
+        assert_eq!(body, self.expected_bodies[index]);
+        Ok(self.responses[index].clone())
+    }
+}
+
+#[derive(Debug, Clone)]
 struct MismatchSource {
     eth: PriceBar,
     btc: PriceBar,
@@ -224,6 +243,97 @@ async fn hyperliquid_price_source_handles_missing_data() {
         .await
         .unwrap_err();
     assert!(matches!(err, DataError::MissingData(_)));
+}
+
+#[tokio::test]
+async fn hyperliquid_price_source_fetch_history_paginates() {
+    const INTERVAL_MS: i64 = 900_000;
+    const MAX_BARS: i64 = 5_000;
+
+    let start = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+    let end = start + chrono::Duration::minutes(15 * MAX_BARS);
+    let start_ms = start.timestamp_millis();
+    let end_ms = end.timestamp_millis();
+    let first_end_ms = start_ms + INTERVAL_MS * MAX_BARS;
+
+    let expected_bodies = vec![
+        json!({
+            "type": "candleSnapshot",
+            "req": {
+                "coin": "ETH",
+                "interval": "15m",
+                "startTime": start_ms,
+                "endTime": first_end_ms,
+            }
+        }),
+        json!({
+            "type": "candleSnapshot",
+            "req": {
+                "coin": "ETH",
+                "interval": "15m",
+                "startTime": start_ms + INTERVAL_MS * MAX_BARS,
+                "endTime": end_ms + INTERVAL_MS,
+            }
+        }),
+    ];
+
+    let responses = vec![
+        HttpResponse {
+            status: 200,
+            body: json!([
+                {
+                    "t": start_ms,
+                    "T": start_ms + INTERVAL_MS,
+                    "o": "100.0",
+                    "h": "101.0",
+                    "l": "99.0",
+                    "c": "100.0",
+                    "v": "10.0"
+                }
+            ])
+            .to_string(),
+        },
+        HttpResponse {
+            status: 200,
+            body: json!([
+                {
+                    "t": end_ms,
+                    "T": end_ms + INTERVAL_MS,
+                    "o": "110.0",
+                    "h": "111.0",
+                    "l": "109.0",
+                    "c": "110.0",
+                    "v": "11.0"
+                }
+            ])
+            .to_string(),
+        },
+    ];
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let client = SequencedHttpClient {
+        expected_url: "http://localhost/info".to_string(),
+        expected_bodies,
+        responses,
+        calls: calls.clone(),
+    };
+    let limiter = Arc::new(CountingRateLimiter::default());
+    let source = HyperliquidPriceSource::with_client_and_rate_limiter(
+        "http://localhost",
+        Arc::new(client),
+        limiter.clone(),
+    );
+
+    let bars = source
+        .fetch_history(Symbol::EthPerp, start, end)
+        .await
+        .unwrap();
+
+    assert_eq!(bars.len(), 2);
+    assert_eq!(bars[0].timestamp, start);
+    assert_eq!(bars[1].timestamp, end);
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(limiter.calls.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]

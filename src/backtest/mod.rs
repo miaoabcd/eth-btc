@@ -15,7 +15,9 @@ use crate::core::{ExitReason, TradeDirection};
 use crate::core::pipeline::SignalPipeline;
 use crate::funding::{FundingRate, estimate_funding_cost};
 use crate::logging::BarLog;
-use crate::position::{MinSizePolicy, SizeConverter, compute_capital, risk_parity_weights};
+use crate::position::{
+    MinSizePolicy, PositionError, SizeConverter, compute_capital, risk_parity_weights,
+};
 use crate::state::{PositionLeg, PositionSnapshot, StateMachine};
 
 #[derive(Debug, Error)]
@@ -123,11 +125,22 @@ impl BacktestEngine {
         let mut trades = Vec::new();
         let mut equity_curve = Vec::new();
         let mut bar_logs = Vec::new();
-        let mut equity = self
-            .config
-            .position
-            .c_value
-            .unwrap_or(Decimal::new(100000, 0));
+        let mut equity = match self.config.position.c_mode {
+            crate::config::CapitalMode::FixedNotional => self
+                .config
+                .position
+                .c_value
+                .unwrap_or(Decimal::new(100000, 0)),
+            crate::config::CapitalMode::EquityRatio => self
+                .config
+                .position
+                .equity_value
+                .ok_or_else(|| {
+                    BacktestError::Position(
+                        "equity_value required for equity ratio mode".to_string(),
+                    )
+                })?,
+        };
 
         let mut open_trade: Option<(PositionSnapshot, Decimal, Decimal)> = None;
 
@@ -183,39 +196,45 @@ impl BacktestEngine {
                         .unwrap_or_default(),
                     MinSizePolicy::Skip,
                 );
-                let eth_order = eth_converter
-                    .convert_notional(notional_eth, bar.eth_price)
-                    .map_err(|err| BacktestError::Position(err.to_string()))?;
-                let btc_order = btc_converter
-                    .convert_notional(notional_btc, bar.btc_price)
-                    .map_err(|err| BacktestError::Position(err.to_string()))?;
-
-                let position = PositionSnapshot {
-                    direction: signal.direction,
-                    entry_time: bar.timestamp,
-                    eth: PositionLeg {
-                        qty: if signal.direction == TradeDirection::LongEthShortBtc {
-                            eth_order.qty
-                        } else {
-                            -eth_order.qty
-                        },
-                        avg_price: bar.eth_price,
-                        notional: notional_eth,
-                    },
-                    btc: PositionLeg {
-                        qty: if signal.direction == TradeDirection::LongEthShortBtc {
-                            -btc_order.qty
-                        } else {
-                            btc_order.qty
-                        },
-                        avg_price: bar.btc_price,
-                        notional: notional_btc,
-                    },
+                let eth_order = match eth_converter.convert_notional(notional_eth, bar.eth_price) {
+                    Ok(order) => Some(order),
+                    Err(PositionError::BelowMinimum(_)) => None,
+                    Err(err) => return Err(BacktestError::Position(err.to_string())),
                 };
-                state_machine
-                    .enter(position.clone(), bar.timestamp)
-                    .map_err(|err| BacktestError::Position(err.to_string()))?;
-                open_trade = Some((position, bar.eth_price, bar.btc_price));
+                let btc_order = match btc_converter.convert_notional(notional_btc, bar.btc_price) {
+                    Ok(order) => Some(order),
+                    Err(PositionError::BelowMinimum(_)) => None,
+                    Err(err) => return Err(BacktestError::Position(err.to_string())),
+                };
+
+                if let (Some(eth_order), Some(btc_order)) = (eth_order, btc_order) {
+                    let position = PositionSnapshot {
+                        direction: signal.direction,
+                        entry_time: bar.timestamp,
+                        eth: PositionLeg {
+                            qty: if signal.direction == TradeDirection::LongEthShortBtc {
+                                eth_order.qty
+                            } else {
+                                -eth_order.qty
+                            },
+                            avg_price: bar.eth_price,
+                            notional: notional_eth,
+                        },
+                        btc: PositionLeg {
+                            qty: if signal.direction == TradeDirection::LongEthShortBtc {
+                                -btc_order.qty
+                            } else {
+                                btc_order.qty
+                            },
+                            avg_price: bar.btc_price,
+                            notional: notional_btc,
+                        },
+                    };
+                    state_machine
+                        .enter(position.clone(), bar.timestamp)
+                        .map_err(|err| BacktestError::Position(err.to_string()))?;
+                    open_trade = Some((position, bar.eth_price, bar.btc_price));
+                }
             }
 
             if let Some(exit_signal) = exit_signal
@@ -324,7 +343,13 @@ fn compute_trade_pnl(input: TradeInput<'_>, config: &Config) -> Result<Decimal, 
     let total_notional = input.notional_eth + input.notional_btc;
     let fee_bps = Decimal::from(config.backtest.fee_bps) / Decimal::new(10000, 0);
     let slippage_bps = Decimal::from(config.backtest.slippage_bps) / Decimal::new(10000, 0);
-    let cost = total_notional * (fee_bps + slippage_bps);
+    let mut cost = Decimal::ZERO;
+    if config.backtest.include_fees {
+        cost += total_notional * fee_bps;
+    }
+    if config.backtest.include_slippage {
+        cost += total_notional * slippage_bps;
+    }
     pnl -= cost;
 
     if config.backtest.include_funding
@@ -415,6 +440,39 @@ mod tests {
 
         let pnl = compute_trade_pnl(input, &config).unwrap();
         assert_eq!(pnl, -expected.cost_est);
+    }
+
+    #[test]
+    fn trade_pnl_respects_fee_and_slippage_flags() {
+        let mut config = Config::default();
+        config.backtest.include_fees = false;
+        config.backtest.include_slippage = false;
+        config.backtest.include_funding = false;
+        config.backtest.fee_bps = 100;
+        config.backtest.slippage_bps = 100;
+
+        let bar = BacktestBar {
+            timestamp: Utc::now(),
+            eth_price: dec!(100),
+            btc_price: dec!(100),
+            funding_eth: None,
+            funding_btc: None,
+        };
+
+        let input = TradeInput {
+            direction: TradeDirection::LongEthShortBtc,
+            entry_eth: dec!(100),
+            entry_btc: dec!(100),
+            exit_eth: dec!(100),
+            exit_btc: dec!(100),
+            notional_eth: dec!(50),
+            notional_btc: dec!(50),
+            bar: &bar,
+            holding_hours: 1,
+        };
+
+        let pnl = compute_trade_pnl(input, &config).unwrap();
+        assert_eq!(pnl, Decimal::ZERO);
     }
 }
 

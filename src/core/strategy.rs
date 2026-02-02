@@ -8,7 +8,9 @@ use crate::core::pipeline::SignalPipeline;
 use crate::execution::{ExecutionEngine, OrderRequest, OrderSide};
 use crate::funding::{FundingRate, apply_funding_controls, estimate_funding_cost};
 use crate::logging::{BarLog, LogEvent, TradeEvent, TradeLog};
-use crate::position::{MinSizePolicy, SizeConverter, compute_capital, risk_parity_weights};
+use crate::position::{
+    MinSizePolicy, PositionError, SizeConverter, compute_capital, risk_parity_weights,
+};
 use crate::state::{PositionLeg, PositionSnapshot, StateMachine, StrategyState, StrategyStatus};
 
 #[derive(Debug, Clone)]
@@ -220,12 +222,46 @@ impl StrategyEngine {
                     .unwrap_or_default(),
                 MinSizePolicy::Skip,
             );
-            let eth_order = eth_converter
-                .convert_notional(notional_eth_value, bar.eth_price)
-                .map_err(|err| StrategyError::Position(err.to_string()))?;
-            let btc_order = btc_converter
-                .convert_notional(notional_btc_value, bar.btc_price)
-                .map_err(|err| StrategyError::Position(err.to_string()))?;
+            let eth_order = match eth_converter.convert_notional(notional_eth_value, bar.eth_price)
+            {
+                Ok(order) => order,
+                Err(PositionError::BelowMinimum(_)) => {
+                    return Ok(self.build_outcome(
+                        bar,
+                        z_snapshot,
+                        vol_snapshot,
+                        events,
+                        w_eth,
+                        w_btc,
+                        Some(notional_eth_value),
+                        Some(notional_btc_value),
+                        funding_cost_est,
+                        funding_skip,
+                        trade_logs,
+                    ));
+                }
+                Err(err) => return Err(StrategyError::Position(err.to_string())),
+            };
+            let btc_order = match btc_converter.convert_notional(notional_btc_value, bar.btc_price)
+            {
+                Ok(order) => order,
+                Err(PositionError::BelowMinimum(_)) => {
+                    return Ok(self.build_outcome(
+                        bar,
+                        z_snapshot,
+                        vol_snapshot,
+                        events,
+                        w_eth,
+                        w_btc,
+                        Some(notional_eth_value),
+                        Some(notional_btc_value),
+                        funding_cost_est,
+                        funding_skip,
+                        trade_logs,
+                    ));
+                }
+                Err(err) => return Err(StrategyError::Position(err.to_string())),
+            };
 
             let (eth_side, btc_side) = match signal.direction {
                 TradeDirection::LongEthShortBtc => (OrderSide::Buy, OrderSide::Sell),
