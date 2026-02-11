@@ -141,6 +141,46 @@ Add `--reduce-only` to send a reduce-only close, or `--dry-run` to print the ord
 - `--config` + `logging.price_db_path`: 开启实时价格持久化（SQLite）
 - 位置管理：`position.min_size_policy = "SKIP" | "ADJUST"`（默认 SKIP；ADJUST 会自动抬到交易所最小下单）
 
+### 推荐部署（常驻进程 + systemd）
+
+1. 生成 release 可执行：
+   ```bash
+   cargo build --release
+   ```
+2. 创建运行目录与日志：
+   ```bash
+   mkdir -p /opt/eth-btc /var/log/eth-btc
+   cp target/release/eth_btc_strategy /opt/eth-btc/
+   cp config.toml /opt/eth-btc/
+   ```
+3. systemd 单元示例 `/etc/systemd/system/eth-btc.service`：
+   ```
+   [Unit]
+   Description=ETH/BTC Mean Reversion (Hyperliquid)
+   After=network-online.target
+
+   [Service]
+   WorkingDirectory=/opt/eth-btc
+   ExecStart=/opt/eth-btc/eth_btc_strategy --config /opt/eth-btc/config.toml --interval-secs 900
+   Environment=RUST_LOG=info
+   Restart=always
+   RestartSec=5
+   StandardOutput=append:/var/log/eth-btc/stdout.log
+   StandardError=append:/var/log/eth-btc/stderr.log
+
+   [Install]
+   WantedBy=multi-user.target
+   ```
+4. 启用并启动：
+   ```bash
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now eth-btc.service
+   ```
+5. 日志/数据：
+   - `logging.stats_path` / `logging.trade_path`：按需设置到 `/var/log/eth-btc/`。
+   - `logging.price_db_path`: e.g. `/opt/eth-btc/data/prices.sqlite`（启动自动回填不足的 15m bars 至 n_z）。
+   - `--paper` 仅用于仿真；实盘去掉并提供私钥/金库地址。
+
 ## Environment variables
 
 See `.env.example` for the full list, including:
