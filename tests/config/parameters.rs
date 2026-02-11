@@ -77,7 +77,10 @@ fn default_logging_parameters() {
     let config = get_default_config();
 
     assert_eq!(config.logging.level, "info");
-    assert!(matches!(config.logging.format, LogFormat::Json | LogFormat::Text));
+    assert!(matches!(
+        config.logging.format,
+        LogFormat::Json | LogFormat::Text
+    ));
     assert!(config.logging.stats_path.is_none());
     assert!(config.logging.stats_format.is_none());
     assert!(config.logging.trade_path.is_none());
@@ -109,7 +112,9 @@ fn tp_z_must_be_less_than_entry_z() {
     let mut config = get_default_config();
     config.strategy.tp_z = config.strategy.entry_z;
 
-    let err = config.validate().expect_err("expected tp_z validation failure");
+    let err = config
+        .validate()
+        .expect_err("expected tp_z validation failure");
     assert!(matches!(
         err,
         eth_btc_strategy::config::ConfigError::InvalidValue { field, .. }

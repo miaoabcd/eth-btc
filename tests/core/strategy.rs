@@ -2,13 +2,13 @@ use chrono::{TimeZone, Utc};
 use rust_decimal_macros::dec;
 
 use eth_btc_strategy::config::{CapitalMode, Config};
-use eth_btc_strategy::core::strategy::StrategyEngine;
 use eth_btc_strategy::core::TradeDirection;
-use eth_btc_strategy::logging::{LogEvent, TradeEvent, TradeLog};
+use eth_btc_strategy::core::strategy::StrategyEngine;
 use eth_btc_strategy::execution::{
     ExecutionEngine, OrderExecutor, OrderRequest, PaperOrderExecutor, RetryConfig,
 };
 use eth_btc_strategy::funding::estimate_funding_cost;
+use eth_btc_strategy::logging::{LogEvent, TradeEvent, TradeLog};
 use eth_btc_strategy::state::{PositionLeg, PositionSnapshot, StrategyState, StrategyStatus};
 
 #[derive(Default)]
@@ -18,7 +18,10 @@ struct RecordingExecutor {
 
 #[async_trait::async_trait]
 impl OrderExecutor for RecordingExecutor {
-    async fn submit(&self, order: &OrderRequest) -> Result<rust_decimal::Decimal, eth_btc_strategy::execution::ExecutionError> {
+    async fn submit(
+        &self,
+        order: &OrderRequest,
+    ) -> Result<rust_decimal::Decimal, eth_btc_strategy::execution::ExecutionError> {
         self.submitted
             .lock()
             .expect("submit lock")
@@ -26,7 +29,10 @@ impl OrderExecutor for RecordingExecutor {
         Ok(order.qty)
     }
 
-    async fn close(&self, order: &OrderRequest) -> Result<rust_decimal::Decimal, eth_btc_strategy::execution::ExecutionError> {
+    async fn close(
+        &self,
+        order: &OrderRequest,
+    ) -> Result<rust_decimal::Decimal, eth_btc_strategy::execution::ExecutionError> {
         self.submitted
             .lock()
             .expect("submit lock")
@@ -225,7 +231,10 @@ async fn strategy_engine_enforces_max_notional_limit() {
     };
 
     let err = engine.process_bar(bar).await.unwrap_err();
-    assert!(matches!(err, eth_btc_strategy::core::strategy::StrategyError::Position(_)));
+    assert!(matches!(
+        err,
+        eth_btc_strategy::core::strategy::StrategyError::Position(_)
+    ));
 }
 
 #[tokio::test]
@@ -324,7 +333,10 @@ async fn strategy_engine_emits_trade_logs_on_entry_and_exit() {
     assert!(entry_outcome.events.contains(&LogEvent::Entry));
     assert_eq!(entry_outcome.trade_logs.len(), 1);
     match &entry_outcome.trade_logs[0] {
-        TradeLog { event: TradeEvent::Entry, .. } => {}
+        TradeLog {
+            event: TradeEvent::Entry,
+            ..
+        } => {}
         other => panic!("unexpected entry trade log {other:?}"),
     }
 

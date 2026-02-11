@@ -3,7 +3,10 @@ use rust_decimal::Decimal;
 
 use crate::config::Config;
 use crate::core::{EntrySignal, ExitSignal};
-use crate::indicators::{IndicatorError, VolatilityCalculator, VolatilitySnapshot, ZScoreCalculator, ZScoreSnapshot, relative_price};
+use crate::indicators::{
+    IndicatorError, VolatilityCalculator, VolatilitySnapshot, ZScoreCalculator, ZScoreSnapshot,
+    relative_price,
+};
 use crate::signals::{EntrySignalDetector, ExitSignalDetector};
 use crate::state::{PositionSnapshot, StrategyStatus};
 

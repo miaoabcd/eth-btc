@@ -1049,7 +1049,6 @@ impl ConfigOverrides {
         let overrides = toml::from_str(&content)?;
         Ok(overrides)
     }
-
 }
 
 pub fn load_config(path: Option<&Path>) -> Result<Config, ConfigError> {

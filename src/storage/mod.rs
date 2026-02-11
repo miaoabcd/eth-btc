@@ -3,8 +3,8 @@ use std::str::FromStr;
 use std::sync::Mutex;
 
 use chrono::{DateTime, Utc};
-use rust_decimal::Decimal;
 use rusqlite::Connection;
+use rust_decimal::Decimal;
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -90,7 +90,10 @@ impl PriceStore {
         Ok(())
     }
 
-    pub fn load(&self, timestamp: DateTime<Utc>) -> Result<Option<PriceBarRecord>, PriceStoreError> {
+    pub fn load(
+        &self,
+        timestamp: DateTime<Utc>,
+    ) -> Result<Option<PriceBarRecord>, PriceStoreError> {
         let mut stmt = self
             .conn
             .prepare(

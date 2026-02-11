@@ -181,9 +181,9 @@ impl HyperliquidFundingSource {
                 "BTC" => Symbol::BtcPerp,
                 _ => continue,
             };
-            let ctx = ctxs.get(index).ok_or_else(|| {
-                FundingError::InvalidRate("asset context missing".to_string())
-            })?;
+            let ctx = ctxs
+                .get(index)
+                .ok_or_else(|| FundingError::InvalidRate("asset context missing".to_string()))?;
             let funding = ctx
                 .get("funding")
                 .ok_or_else(|| FundingError::MissingData("funding rate missing".to_string()))?;

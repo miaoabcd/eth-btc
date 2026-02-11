@@ -207,7 +207,6 @@ struct HyperliquidExchangeRequest {
     expires_after: Option<u64>,
 }
 
-
 #[derive(Debug, Serialize)]
 #[serde(tag = "type")]
 enum HyperliquidExchangeAction {
@@ -313,7 +312,9 @@ impl HyperliquidExecResponse {
 #[serde(tag = "type")]
 enum HyperliquidExecResponseData {
     #[serde(rename = "order")]
-    Order { data: HyperliquidExecOrderResponseData },
+    Order {
+        data: HyperliquidExecOrderResponseData,
+    },
     #[serde(rename = "updateLeverage")]
     UpdateLeverage {
         #[allow(dead_code)]
@@ -338,9 +339,9 @@ impl HyperliquidExecOrderResponseData {
         match status {
             HyperliquidExecOrderStatus::Filled { filled } => Ok(filled.total_sz),
             HyperliquidExecOrderStatus::Error { error } => Err(ExecutionError::Fatal(error)),
-            HyperliquidExecOrderStatus::Resting { .. } => Err(ExecutionError::Fatal(
-                "order resting on book".to_string(),
-            )),
+            HyperliquidExecOrderStatus::Resting { .. } => {
+                Err(ExecutionError::Fatal("order resting on book".to_string()))
+            }
         }
     }
 }
@@ -348,12 +349,16 @@ impl HyperliquidExecOrderResponseData {
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum HyperliquidExecOrderStatus {
-    Filled { filled: HyperliquidFilledInfo },
+    Filled {
+        filled: HyperliquidFilledInfo,
+    },
     Resting {
         #[allow(dead_code)]
         resting: serde_json::Value,
     },
-    Error { error: String },
+    Error {
+        error: String,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -416,7 +421,11 @@ impl HyperliquidSigner {
     ) -> Result<HyperliquidSignature, ExecutionError> {
         let connection_id = Self::connection_id(action, nonce, vault_address)?;
         let agent = Agent {
-            source: if is_testnet { "b".to_string() } else { "a".to_string() },
+            source: if is_testnet {
+                "b".to_string()
+            } else {
+                "a".to_string()
+            },
             connectionId: connection_id,
         };
         let domain = eip712_domain! {
@@ -575,12 +584,10 @@ impl LiveOrderExecutor {
                 Ok(specs)
             }
             429 => Err(ExecutionError::Transient("rate limited".to_string())),
-            status if status >= 500 => Err(ExecutionError::Transient(format!(
-                "server error {status}"
-            ))),
-            status => Err(ExecutionError::Fatal(format!(
-                "client error {status}"
-            ))),
+            status if status >= 500 => {
+                Err(ExecutionError::Transient(format!("server error {status}")))
+            }
+            status => Err(ExecutionError::Fatal(format!("client error {status}"))),
         }
     }
 
@@ -637,12 +644,17 @@ impl LiveOrderExecutor {
             }],
             grouping: HyperliquidOrderGrouping::Na,
         };
-        let signer = self.signer.as_ref().ok_or_else(|| {
-            ExecutionError::Fatal("missing Hyperliquid private key".to_string())
-        })?;
+        let signer = self
+            .signer
+            .as_ref()
+            .ok_or_else(|| ExecutionError::Fatal("missing Hyperliquid private key".to_string()))?;
         let nonce = self.nonce_provider.next_nonce();
-        let signature =
-            signer.sign(&action, nonce, self.is_testnet, self.vault_address.as_deref())?;
+        let signature = signer.sign(
+            &action,
+            nonce,
+            self.is_testnet,
+            self.vault_address.as_deref(),
+        )?;
         let payload = HyperliquidExchangeRequest {
             action,
             nonce,
@@ -683,12 +695,17 @@ impl LiveOrderExecutor {
             is_cross,
             leverage,
         };
-        let signer = self.signer.as_ref().ok_or_else(|| {
-            ExecutionError::Fatal("missing Hyperliquid private key".to_string())
-        })?;
+        let signer = self
+            .signer
+            .as_ref()
+            .ok_or_else(|| ExecutionError::Fatal("missing Hyperliquid private key".to_string()))?;
         let nonce = self.nonce_provider.next_nonce();
-        let signature =
-            signer.sign(&action, nonce, self.is_testnet, self.vault_address.as_deref())?;
+        let signature = signer.sign(
+            &action,
+            nonce,
+            self.is_testnet,
+            self.vault_address.as_deref(),
+        )?;
         let payload = HyperliquidExchangeRequest {
             action,
             nonce,

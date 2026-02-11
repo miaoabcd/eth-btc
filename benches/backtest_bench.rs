@@ -1,5 +1,5 @@
 use chrono::{TimeZone, Utc};
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 use rust_decimal_macros::dec;
 
 use eth_btc_strategy::backtest::{EquityPoint, Trade, TradeExitReason, compute_metrics};

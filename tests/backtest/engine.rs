@@ -77,7 +77,11 @@ fn backtest_engine_requires_equity_value_for_equity_ratio() {
     config.position.n_vol = 1;
     config.strategy.entry_z = dec!(0.5);
 
-    let bars = vec![bar(0, dec!(0.0)), bar(900, dec!(0.0)), bar(1800, dec!(0.04))];
+    let bars = vec![
+        bar(0, dec!(0.0)),
+        bar(900, dec!(0.0)),
+        bar(1800, dec!(0.04)),
+    ];
 
     let engine = BacktestEngine::new(config);
     let result = engine.run(&bars);

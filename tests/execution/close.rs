@@ -27,11 +27,11 @@ struct RecordingExecutor {
 
 #[async_trait::async_trait]
 impl eth_btc_strategy::execution::OrderExecutor for RecordingExecutor {
-    async fn submit(
-        &self,
-        order: &OrderRequest,
-    ) -> Result<rust_decimal::Decimal, ExecutionError> {
-        self.submitted.lock().expect("submit lock").push(order.clone());
+    async fn submit(&self, order: &OrderRequest) -> Result<rust_decimal::Decimal, ExecutionError> {
+        self.submitted
+            .lock()
+            .expect("submit lock")
+            .push(order.clone());
         self.submit_responses
             .lock()
             .expect("submit responses lock")
@@ -39,10 +39,7 @@ impl eth_btc_strategy::execution::OrderExecutor for RecordingExecutor {
             .unwrap_or_else(|| Ok(order.qty))
     }
 
-    async fn close(
-        &self,
-        _order: &OrderRequest,
-    ) -> Result<rust_decimal::Decimal, ExecutionError> {
+    async fn close(&self, _order: &OrderRequest) -> Result<rust_decimal::Decimal, ExecutionError> {
         self.close_responses
             .lock()
             .expect("close responses lock")

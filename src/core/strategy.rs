@@ -436,8 +436,7 @@ impl StrategyEngine {
     }
 
     fn limit_price(&self, side: OrderSide, price: Decimal) -> Decimal {
-        let slippage = Decimal::from(self.config.execution.slippage_bps)
-            / Decimal::new(10000, 0);
+        let slippage = Decimal::from(self.config.execution.slippage_bps) / Decimal::new(10000, 0);
         match side {
             OrderSide::Buy => price * (Decimal::ONE + slippage),
             OrderSide::Sell => price * (Decimal::ONE - slippage),

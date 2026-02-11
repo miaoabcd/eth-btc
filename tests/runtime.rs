@@ -1,8 +1,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::{TimeZone, Utc};
 use async_trait::async_trait;
+use chrono::{TimeZone, Utc};
 use rust_decimal_macros::dec;
 use tokio::sync::watch;
 
@@ -14,8 +14,8 @@ use eth_btc_strategy::execution::{ExecutionEngine, PaperOrderExecutor, RetryConf
 use eth_btc_strategy::funding::{FundingFetcher, FundingRate, MockFundingSource};
 use eth_btc_strategy::logging::{BarLogWriter, TradeLog, TradeLogWriter};
 use eth_btc_strategy::runtime::{LiveRunner, RunnerError, StateWriter};
-use eth_btc_strategy::storage::{PriceBarRecord, PriceBarWriter};
 use eth_btc_strategy::state::StrategyState;
+use eth_btc_strategy::storage::{PriceBarRecord, PriceBarWriter};
 
 #[derive(Default)]
 struct MockStateWriter {
@@ -84,10 +84,7 @@ impl MockStateWriter {
 
 #[async_trait]
 impl StateWriter for MockStateWriter {
-    async fn save(
-        &self,
-        state: &StrategyState,
-    ) -> Result<(), eth_btc_strategy::state::StateError> {
+    async fn save(&self, state: &StrategyState) -> Result<(), eth_btc_strategy::state::StateError> {
         *self.saved.lock().expect("state lock") = Some(state.clone());
         Ok(())
     }
@@ -248,8 +245,14 @@ async fn runner_writes_trade_logs() {
     }
 
     let logs = writer.logs();
-    assert!(logs.iter().any(|log| matches!(log.event, eth_btc_strategy::logging::TradeEvent::Entry)));
-    assert!(logs.iter().any(|log| matches!(log.event, eth_btc_strategy::logging::TradeEvent::Exit(_))));
+    assert!(
+        logs.iter()
+            .any(|log| matches!(log.event, eth_btc_strategy::logging::TradeEvent::Entry))
+    );
+    assert!(
+        logs.iter()
+            .any(|log| matches!(log.event, eth_btc_strategy::logging::TradeEvent::Exit(_)))
+    );
 }
 
 #[tokio::test]
@@ -312,8 +315,8 @@ async fn runner_uses_account_balance_for_equity_ratio() {
     }
     let account_source = Arc::new(account_source);
 
-    let mut runner = LiveRunner::new(engine, price_fetcher, None)
-        .with_account_source(account_source);
+    let mut runner =
+        LiveRunner::new(engine, price_fetcher, None).with_account_source(account_source);
 
     let mut last = None;
     for ts in timestamps {
@@ -332,7 +335,10 @@ async fn runner_surfaces_data_errors() {
     let execution = ExecutionEngine::new(Arc::new(PaperOrderExecutor), RetryConfig::fast());
     let engine = eth_btc_strategy::core::strategy::StrategyEngine::new(config.clone(), execution)
         .expect("engine");
-    let price_fetcher = PriceFetcher::new(Arc::new(MockPriceSource::default()), config.data.price_field);
+    let price_fetcher = PriceFetcher::new(
+        Arc::new(MockPriceSource::default()),
+        config.data.price_field,
+    );
     let mut runner = LiveRunner::new(engine, price_fetcher, None);
 
     let err = runner.run_once_at(timestamp).await.unwrap_err();

@@ -28,3 +28,4 @@ scripts/liblink_fallback.so
 review.md
 config.toml
 config.toml.local
+data/

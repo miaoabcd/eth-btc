@@ -12,8 +12,8 @@ use crate::core::strategy::{StrategyBar, StrategyEngine, StrategyError, Strategy
 use crate::data::{DataError, PriceFetcher};
 use crate::funding::FundingFetcher;
 use crate::logging::{BarLogWriter, TradeLogWriter};
-use crate::storage::{PriceBarRecord, PriceBarWriter};
 use crate::state::{StateError, StateStore, StrategyState};
+use crate::storage::{PriceBarRecord, PriceBarWriter};
 
 #[derive(Debug, Error)]
 pub enum RunnerError {
@@ -120,10 +120,7 @@ impl LiveRunner {
         &mut self,
         timestamp: DateTime<Utc>,
     ) -> Result<StrategyOutcome, RunnerError> {
-        let bars_snapshot = self
-            .price_fetcher
-            .fetch_pair_bars(timestamp)
-            .await?;
+        let bars_snapshot = self.price_fetcher.fetch_pair_bars(timestamp).await?;
         let snapshot = bars_snapshot.snapshot.clone();
 
         let funding = if let Some(fetcher) = &self.funding_fetcher {
@@ -178,10 +175,7 @@ impl LiveRunner {
             funding_interval_hours: funding.as_ref().map(|value| value.interval_hours),
         };
 
-        let outcome = self
-            .engine
-            .process_bar(bar)
-            .await?;
+        let outcome = self.engine.process_bar(bar).await?;
         if let Some(writer) = &self.state_writer {
             writer.save(self.engine.state().state()).await?;
         }

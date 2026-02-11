@@ -11,8 +11,9 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::config::{Config, PriceField, Symbol};
-use crate::core::{ExitReason, TradeDirection};
 use crate::core::pipeline::SignalPipeline;
+use crate::core::{ExitReason, TradeDirection};
+use crate::data::align_to_bar_close;
 use crate::funding::{FundingRate, estimate_funding_cost};
 use crate::logging::BarLog;
 use crate::position::{
@@ -20,7 +21,6 @@ use crate::position::{
 };
 use crate::state::{PositionLeg, PositionSnapshot, StateMachine};
 use crate::storage::PriceStore;
-use crate::data::align_to_bar_close;
 
 #[derive(Debug, Error)]
 pub enum BacktestError {
@@ -135,15 +135,13 @@ impl BacktestEngine {
                 .position
                 .c_value
                 .unwrap_or(Decimal::new(100000, 0)),
-            crate::config::CapitalMode::EquityRatio => self
-                .config
-                .position
-                .equity_value
-                .ok_or_else(|| {
+            crate::config::CapitalMode::EquityRatio => {
+                self.config.position.equity_value.ok_or_else(|| {
                     BacktestError::Position(
                         "equity_value required for equity ratio mode".to_string(),
                     )
-                })?,
+                })?
+            }
         };
 
         let mut open_trade: Option<(PositionSnapshot, Decimal, Decimal)> = None;
@@ -254,9 +252,8 @@ impl BacktestEngine {
                         notional_eth: position.eth.notional,
                         notional_btc: position.btc.notional,
                         bar,
-                        holding_hours: (bar.timestamp - position.entry_time)
-                            .num_hours()
-                            .max(0) as u32,
+                        holding_hours: (bar.timestamp - position.entry_time).num_hours().max(0)
+                            as u32,
                     },
                     &self.config,
                 )?;
@@ -631,8 +628,7 @@ pub fn load_backtest_bars_from_db(
     end: DateTime<Utc>,
     price_field: PriceField,
 ) -> Result<Vec<BacktestBar>, BacktestError> {
-    let start = align_to_bar_close(start)
-        .map_err(|err| BacktestError::Storage(err.to_string()))?;
+    let start = align_to_bar_close(start).map_err(|err| BacktestError::Storage(err.to_string()))?;
     let end = align_to_bar_close(end).map_err(|err| BacktestError::Storage(err.to_string()))?;
     let store = PriceStore::new(path.to_string_lossy().as_ref())
         .map_err(|err| BacktestError::Storage(err.to_string()))?;

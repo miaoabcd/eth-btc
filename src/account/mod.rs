@@ -116,9 +116,8 @@ impl HyperliquidAccountSource {
                 )));
             }
         };
-        Decimal::from_str(&value).map_err(|err| {
-            AccountError::InvalidResponse(format!("invalid decimal {value}: {err}"))
-        })
+        Decimal::from_str(&value)
+            .map_err(|err| AccountError::InvalidResponse(format!("invalid decimal {value}: {err}")))
     }
 
     fn parse_available_balance(&self, body: &str) -> Result<Decimal, AccountError> {

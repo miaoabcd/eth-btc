@@ -220,12 +220,15 @@ async fn live_executor_applies_rate_limiter() {
     });
     let limiter = std::sync::Arc::new(CountingRateLimiter::default());
 
-    let executor =
-        LiveOrderExecutor::with_client_and_rate_limiter("http://localhost", client, limiter.clone())
-            .with_signer(HyperliquidSigner::new(
-                "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef".to_string(),
-            ))
-            .with_nonce_provider(std::sync::Arc::new(FixedNonce::new(1_700_000_000_000)));
+    let executor = LiveOrderExecutor::with_client_and_rate_limiter(
+        "http://localhost",
+        client,
+        limiter.clone(),
+    )
+    .with_signer(HyperliquidSigner::new(
+        "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef".to_string(),
+    ))
+    .with_nonce_provider(std::sync::Arc::new(FixedNonce::new(1_700_000_000_000)));
     executor.submit(&order()).await.unwrap();
 
     assert_eq!(limiter.calls.load(Ordering::SeqCst), 1);

@@ -234,11 +234,7 @@ impl HyperliquidPriceSource {
             serde_json::from_str(body).map_err(|err| DataError::Parse(err.to_string()))?;
         let candles = if let Some(array) = value.as_array() {
             array.clone()
-        } else if let Some(array) = value
-            .get("data")
-            .and_then(|data| data.as_array())
-            .cloned()
-        {
+        } else if let Some(array) = value.get("data").and_then(|data| data.as_array()).cloned() {
             array
         } else if let Some(array) = value
             .get("candles")
@@ -271,7 +267,9 @@ impl HyperliquidPriceSource {
             let timestamp = Utc
                 .timestamp_millis_opt(timestamp_ms)
                 .single()
-                .ok_or_else(|| DataError::InvalidTimestamp("candle timestamp invalid".to_string()))?;
+                .ok_or_else(|| {
+                    DataError::InvalidTimestamp("candle timestamp invalid".to_string())
+                })?;
             let close = candle
                 .get("c")
                 .ok_or_else(|| DataError::MissingData("candle close missing".to_string()))?;
@@ -323,13 +321,8 @@ impl PriceSource for HyperliquidPriceSource {
         let mut current_start = start;
         while current_start <= end {
             let segment_end = {
-                let candidate =
-                    current_start + chrono::Duration::milliseconds(max_span_ms);
-                if candidate < end {
-                    candidate
-                } else {
-                    end
-                }
+                let candidate = current_start + chrono::Duration::milliseconds(max_span_ms);
+                if candidate < end { candidate } else { end }
             };
             let start_ms = current_start.timestamp_millis();
             let end_ms = segment_end.timestamp_millis() + interval_ms;
@@ -716,7 +709,7 @@ impl PriceHistorySet {
 pub fn align_to_bar_close(timestamp: DateTime<Utc>) -> Result<DateTime<Utc>, DataError> {
     let seconds = timestamp.timestamp();
     let aligned = seconds - seconds.rem_euclid(900);
-    Utc.timestamp_opt(aligned, 0).single().ok_or_else(|| {
-        DataError::InvalidTimestamp("aligned timestamp must be valid".to_string())
-    })
+    Utc.timestamp_opt(aligned, 0)
+        .single()
+        .ok_or_else(|| DataError::InvalidTimestamp("aligned timestamp must be valid".to_string()))
 }
