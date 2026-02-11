@@ -2,6 +2,7 @@ use eth_btc_strategy::config::{
     CapitalMode, Config, FundingMode, LogFormat, PriceField, SigmaFloorMode, Symbol,
     V1_BASELINE_CONFIG, get_default_config,
 };
+use eth_btc_strategy::position::MinSizePolicy;
 use rust_decimal_macros::dec;
 
 #[test]
@@ -81,7 +82,7 @@ fn default_logging_parameters() {
         config.logging.format,
         LogFormat::Json | LogFormat::Text
     ));
-    assert!(config.logging.stats_path.is_none());
+    assert_eq!(config.logging.stats_path.as_deref(), Some("stats.log"));
     assert!(config.logging.stats_format.is_none());
     assert!(config.logging.trade_path.is_none());
     assert!(config.logging.trade_format.is_none());
@@ -98,6 +99,10 @@ fn default_price_field_and_constraints() {
     ));
     assert!(config.instrument_constraints.contains_key(&Symbol::EthPerp));
     assert!(config.instrument_constraints.contains_key(&Symbol::BtcPerp));
+    assert!(matches!(
+        config.position.min_size_policy,
+        MinSizePolicy::Skip | MinSizePolicy::Adjust
+    ));
 }
 
 #[test]

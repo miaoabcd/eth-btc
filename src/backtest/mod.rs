@@ -16,9 +16,7 @@ use crate::core::{ExitReason, TradeDirection};
 use crate::data::align_to_bar_close;
 use crate::funding::{FundingRate, estimate_funding_cost};
 use crate::logging::BarLog;
-use crate::position::{
-    MinSizePolicy, PositionError, SizeConverter, compute_capital, risk_parity_weights,
-};
+use crate::position::{PositionError, SizeConverter, compute_capital, risk_parity_weights};
 use crate::state::{PositionLeg, PositionSnapshot, StateMachine};
 use crate::storage::PriceStore;
 
@@ -188,7 +186,7 @@ impl BacktestEngine {
                         .get(&Symbol::EthPerp)
                         .cloned()
                         .unwrap_or_default(),
-                    MinSizePolicy::Skip,
+                    self.config.position.min_size_policy,
                 );
                 let btc_converter = SizeConverter::new(
                     self.config
@@ -196,7 +194,7 @@ impl BacktestEngine {
                         .get(&Symbol::BtcPerp)
                         .cloned()
                         .unwrap_or_default(),
-                    MinSizePolicy::Skip,
+                    self.config.position.min_size_policy,
                 );
                 let eth_order = match eth_converter.convert_notional(notional_eth, bar.eth_price) {
                     Ok(order) => Some(order),

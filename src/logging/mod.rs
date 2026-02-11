@@ -21,6 +21,7 @@ pub enum LogEvent {
     Exit(ExitReason),
     CooldownStart,
     CooldownEnd,
+    ResidualRepair,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -8,10 +8,9 @@ use crate::core::pipeline::SignalPipeline;
 use crate::execution::{ExecutionEngine, OrderRequest, OrderSide};
 use crate::funding::{FundingRate, apply_funding_controls, estimate_funding_cost};
 use crate::logging::{BarLog, LogEvent, TradeEvent, TradeLog};
-use crate::position::{
-    MinSizePolicy, PositionError, SizeConverter, compute_capital, risk_parity_weights,
-};
+use crate::position::{PositionError, SizeConverter, compute_capital, risk_parity_weights};
 use crate::state::{PositionLeg, PositionSnapshot, StateMachine, StrategyState, StrategyStatus};
+use tracing::warn;
 
 #[derive(Debug, Clone)]
 pub struct StrategyBar {
@@ -88,6 +87,23 @@ impl StrategyEngine {
         bar: StrategyBar,
     ) -> Result<StrategyOutcome, StrategyError> {
         self.state_machine.update(bar.timestamp);
+        let mut events = Vec::new();
+
+        if let Some(position) = self.state_machine.state().position.clone()
+            && position.has_residual()
+        {
+            warn!(
+                eth_qty = %position.eth.qty,
+                btc_qty = %position.btc.qty,
+                "residual leg detected; attempting repair"
+            );
+            self.execution
+                .repair_residual(&position)
+                .await
+                .map_err(|err| StrategyError::Execution(err.to_string()))?;
+            self.state_machine.force_flat();
+            events.push(LogEvent::ResidualRepair);
+        }
         let output = self
             .pipeline
             .update(
@@ -103,7 +119,6 @@ impl StrategyEngine {
         let entry_signal = output.entry_signal;
         let exit_signal = output.exit_signal;
 
-        let mut events = Vec::new();
         let mut w_eth = None;
         let mut w_btc = None;
         let mut notional_eth = None;
@@ -212,7 +227,7 @@ impl StrategyEngine {
                     .get(&Symbol::EthPerp)
                     .cloned()
                     .unwrap_or_default(),
-                MinSizePolicy::Skip,
+                self.config.position.min_size_policy,
             );
             let btc_converter = SizeConverter::new(
                 self.config
@@ -220,7 +235,7 @@ impl StrategyEngine {
                     .get(&Symbol::BtcPerp)
                     .cloned()
                     .unwrap_or_default(),
-                MinSizePolicy::Skip,
+                self.config.position.min_size_policy,
             );
             let eth_order = match eth_converter.convert_notional(notional_eth_value, bar.eth_price)
             {

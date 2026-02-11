@@ -89,6 +89,12 @@ impl StateMachine {
         &self.state
     }
 
+    pub fn force_flat(&mut self) {
+        self.state.status = StrategyStatus::Flat;
+        self.state.position = None;
+        self.state.cooldown_until = None;
+    }
+
     pub fn hydrate(&mut self, state: StrategyState) -> Result<(), StateError> {
         match state.status {
             StrategyStatus::Flat => {

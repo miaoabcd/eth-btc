@@ -40,6 +40,8 @@ c_value = 50000
 n_vol = 672
 # max concurrent position groups (>= 1)
 max_position_groups = 1
+# minimum size policy: SKIP | ADJUST
+min_size_policy = "SKIP"
 
 [funding]
 # modes: FILTER | THRESHOLD | SIZE (can combine)
@@ -101,11 +103,11 @@ level = "info"
 # log format: JSON | TEXT
 format = "JSON"
 # per-bar statistics log file (optional)
-# stats_path = "stats.log"
+stats_path = "stats.log"
 # stats log format: JSON | TEXT (defaults to logging.format)
 # stats_format = "JSON"
 # trade log file (optional)
-# trade_path = "trades.log"
+trade_path = "trades.log"
 # trade log format: JSON | TEXT (defaults to logging.format)
 # trade_format = "JSON"
 # price DB path for persisted candles (optional)

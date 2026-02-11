@@ -4,6 +4,7 @@ use rust_decimal_macros::dec;
 
 use eth_btc_strategy::backtest::{BacktestBar, BacktestEngine};
 use eth_btc_strategy::config::{CapitalMode, Config, SigmaFloorMode};
+use eth_btc_strategy::position::MinSizePolicy;
 
 fn bar(timestamp: i64, r: rust_decimal::Decimal) -> BacktestBar {
     let base = dec!(100);
@@ -65,6 +66,32 @@ fn backtest_engine_skips_entry_below_minimum_size() {
     let result = engine.run(&bars).unwrap();
 
     assert!(result.trades.is_empty());
+}
+
+#[test]
+fn backtest_engine_adjusts_below_minimum_when_policy_adjust() {
+    let mut config = Config::default();
+    config.strategy.n_z = 4;
+    config.strategy.entry_z = dec!(1.5);
+    config.strategy.tp_z = dec!(0.6);
+    config.position.n_vol = 2;
+    config.sigma_floor.mode = SigmaFloorMode::Const;
+    config.position.c_value = Some(dec!(1));
+    config.position.min_size_policy = MinSizePolicy::Adjust;
+
+    let bars = vec![
+        bar(0, dec!(0.0)),
+        bar(900, dec!(0.0)),
+        bar(1800, dec!(0.0)),
+        bar(2700, dec!(0.0)),
+        bar(3600, dec!(0.04)),
+        bar(4500, dec!(0.0)),
+    ];
+
+    let engine = BacktestEngine::new(config);
+    let result = engine.run(&bars).unwrap();
+
+    assert_eq!(result.trades.len(), 1);
 }
 
 #[test]

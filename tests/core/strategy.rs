@@ -1,7 +1,7 @@
 use chrono::{TimeZone, Utc};
 use rust_decimal_macros::dec;
 
-use eth_btc_strategy::config::{CapitalMode, Config};
+use eth_btc_strategy::config::{CapitalMode, Config, Symbol};
 use eth_btc_strategy::core::TradeDirection;
 use eth_btc_strategy::core::strategy::StrategyEngine;
 use eth_btc_strategy::execution::{
@@ -188,6 +188,57 @@ async fn strategy_engine_uses_bar_equity_for_equity_ratio() {
     let outcome = engine.process_bar(bar).await.unwrap();
     assert_eq!(outcome.bar_log.notional_eth, Some(dec!(50)));
     assert_eq!(outcome.bar_log.notional_btc, Some(dec!(50)));
+}
+
+#[tokio::test]
+async fn strategy_engine_repairs_residual_leg_and_flats_state() {
+    let mut config = Config::default();
+    config.strategy.n_z = 1;
+    config.position.n_vol = 1;
+
+    let executor = std::sync::Arc::new(RecordingExecutor::default());
+    let execution = ExecutionEngine::new(executor.clone(), RetryConfig::fast());
+    let mut engine = StrategyEngine::new(config, execution).unwrap();
+
+    let position = PositionSnapshot {
+        direction: TradeDirection::LongEthShortBtc,
+        entry_time: Utc.timestamp_opt(0, 0).unwrap(),
+        eth: PositionLeg {
+            qty: dec!(0),
+            avg_price: dec!(2000),
+            notional: dec!(0),
+        },
+        btc: PositionLeg {
+            qty: dec!(1),
+            avg_price: dec!(30000),
+            notional: dec!(30000),
+        },
+    };
+
+    let state = StrategyState {
+        status: StrategyStatus::InPosition,
+        position: Some(position),
+        cooldown_until: None,
+    };
+    engine.apply_state(state).unwrap();
+
+    let bar = eth_btc_strategy::core::strategy::StrategyBar {
+        timestamp: Utc.timestamp_opt(900, 0).unwrap(),
+        eth_price: dec!(2000),
+        btc_price: dec!(30000),
+        equity: None,
+        funding_eth: None,
+        funding_btc: None,
+        funding_interval_hours: None,
+    };
+
+    let outcome = engine.process_bar(bar).await.unwrap();
+    assert!(outcome.events.contains(&LogEvent::ResidualRepair));
+    assert_eq!(engine.state().state().status, StrategyStatus::Flat);
+
+    let submitted = executor.submitted.lock().unwrap();
+    assert_eq!(submitted.len(), 1);
+    assert_eq!(submitted[0].symbol, Symbol::BtcPerp);
 }
 
 #[tokio::test]

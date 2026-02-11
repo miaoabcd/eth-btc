@@ -7,6 +7,7 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::position::MinSizePolicy;
 #[derive(Debug, Error)]
 pub enum ConfigError {
     #[error("invalid value for {field}: {message}")]
@@ -297,6 +298,7 @@ pub struct PositionConfig {
     pub max_notional: Option<Decimal>,
     pub n_vol: usize,
     pub max_position_groups: u32,
+    pub min_size_policy: MinSizePolicy,
 }
 
 impl Default for PositionConfig {
@@ -309,6 +311,7 @@ impl Default for PositionConfig {
             max_notional: None,
             n_vol: 672,
             max_position_groups: 1,
+            min_size_policy: MinSizePolicy::Skip,
         }
     }
 }
@@ -428,7 +431,7 @@ impl Default for LoggingConfig {
         Self {
             level: "info".to_string(),
             format: LogFormat::Json,
-            stats_path: None,
+            stats_path: Some("stats.log".to_string()),
             stats_format: None,
             trade_path: None,
             trade_format: None,
@@ -770,6 +773,9 @@ impl Config {
         if let Some(value) = overrides.position.max_position_groups {
             self.position.max_position_groups = value;
         }
+        if let Some(value) = overrides.position.min_size_policy {
+            self.position.min_size_policy = value;
+        }
         if let Some(value) = overrides.funding.modes {
             self.funding.modes = value;
         }
@@ -959,6 +965,7 @@ pub struct PositionOverrides {
     pub max_notional: Option<Decimal>,
     pub n_vol: Option<usize>,
     pub max_position_groups: Option<u32>,
+    pub min_size_policy: Option<MinSizePolicy>,
 }
 
 #[derive(Debug, Default, Deserialize)]

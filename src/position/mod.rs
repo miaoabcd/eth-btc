@@ -1,4 +1,5 @@
 use rust_decimal::Decimal;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::config::{CapitalMode, InstrumentConstraints, PositionConfig, RoundingMode};
@@ -66,7 +67,8 @@ pub fn compute_capital(config: &PositionConfig, equity: Decimal) -> Result<Decim
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum MinSizePolicy {
     Skip,
     Adjust,

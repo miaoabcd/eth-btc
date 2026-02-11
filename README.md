@@ -35,8 +35,9 @@ Where to put what:
 
 Statistics log:
 
-- Set `[logging].stats_path` in `config.toml` to append per-bar stats as JSON/TEXT for quick queries.
-- Set `[logging].trade_path` to append trade entry/exit records (one line per trade event).
+- 默认 `[logging].stats_path = "stats.log"`，每根 15m 记录 r/μ/σ/σ_eff/Z、权重、名义、funding 等字段（JSON/TEXT 任选，默认 JSON）。
+- 可选 `[logging].trade_path` 记录每次开/平仓事件。
+- 将 `[logging].price_db_path` 设为 `.sqlite` 文件时，实时行情会追加到 SQLite（可供回测读取）。
 
 Quick queries (JSON format examples):
 
@@ -80,7 +81,9 @@ cargo run --release -- download \
   --output ./data/hyperliquid_bars.json
 ```
 
-The output file is a JSON array of backtest bars (ETH/BTC close prices per 15m candle).
+Output：
+- 以 `.json` 结尾 → 写 JSON 数组（15m bar）。
+- 以 `.sqlite` 结尾 → 直接写入 SQLite（表 `price_bars`，可用 backtest `--db` 读取）。
 
 ### Paper trading (no live orders)
 
@@ -135,6 +138,8 @@ Add `--reduce-only` to send a reduce-only close, or `--dry-run` to print the ord
 - `--once`: run a single iteration and exit
 - `--disable-funding`: ignore funding filters
 - `--paper`: use paper executor instead of live
+- `--config` + `logging.price_db_path`: 开启实时价格持久化（SQLite）
+- 位置管理：`position.min_size_policy = "SKIP" | "ADJUST"`（默认 SKIP；ADJUST 会自动抬到交易所最小下单）
 
 ## Environment variables
 
@@ -150,6 +155,7 @@ See `.env.example` for the full list, including:
 - Live trading requires valid Hyperliquid credentials.
 - Funding filters rely on current funding rates (no historical funding yet).
 - Set `logging.price_db_path` to persist fetched candles into SQLite for later analysis.
+- 单腿残留自动修复：检测到只剩一条腿时会立即尝试 `repair_residual` 并记录事件。
 
 ## Tests
 
