@@ -169,7 +169,7 @@ async fn main() -> anyhow::Result<()> {
             &price_source,
             db_path,
             config.data.price_field,
-            config.strategy.n_z.max(384),
+            config.strategy.n_z.max(config.position.n_vol).max(384),
             Utc::now(),
         )
         .await
