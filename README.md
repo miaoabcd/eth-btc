@@ -138,22 +138,22 @@ Add `--reduce-only` to send a reduce-only close, or `--dry-run` to print the ord
 - `--once`: run a single iteration and exit
 - `--disable-funding`: ignore funding filters
 - `--paper`: use paper executor instead of live
-- `--config` + `logging.price_db_path`: 开启实时价格持久化（SQLite）
-- 位置管理：`position.min_size_policy = "SKIP" | "ADJUST"`（默认 SKIP；ADJUST 会自动抬到交易所最小下单）
+- `--config` + `logging.price_db_path`: enable live price persistence to SQLite
+- Sizing: `position.min_size_policy = "SKIP" | "ADJUST"` (default SKIP; ADJUST bumps to exchange minimums)
 
-### 推荐部署（常驻进程 + systemd）
+### Recommended Deployment (long-running via systemd)
 
-1. 生成 release 可执行：
+1. Build release binary:
    ```bash
    cargo build --release
    ```
-2. 创建运行目录与日志：
+2. Create runtime directories and logs:
    ```bash
    mkdir -p /opt/eth-btc /var/log/eth-btc
    cp target/release/eth_btc_strategy /opt/eth-btc/
    cp config.toml /opt/eth-btc/
    ```
-3. systemd 单元示例 `/etc/systemd/system/eth-btc.service`：
+3. Example unit `/etc/systemd/system/eth-btc.service`:
    ```
    [Unit]
    Description=ETH/BTC Mean Reversion (Hyperliquid)
@@ -171,15 +171,15 @@ Add `--reduce-only` to send a reduce-only close, or `--dry-run` to print the ord
    [Install]
    WantedBy=multi-user.target
    ```
-4. 启用并启动：
+4. Enable and start:
    ```bash
    sudo systemctl daemon-reload
    sudo systemctl enable --now eth-btc.service
    ```
-5. 日志/数据：
-   - `logging.stats_path` / `logging.trade_path`：按需设置到 `/var/log/eth-btc/`。
-   - `logging.price_db_path`: e.g. `/opt/eth-btc/data/prices.sqlite`（启动自动回填不足的 15m bars 至 n_z）。
-   - `--paper` 仅用于仿真；实盘去掉并提供私钥/金库地址。
+5. Logs/data:
+   - `logging.stats_path` / `logging.trade_path`: point to `/var/log/eth-btc/` as needed.
+   - `logging.price_db_path`: e.g. `/opt/eth-btc/data/prices.sqlite` (startup auto-fills missing 15m bars up to `n_z`).
+   - Use `--paper` for simulation only; remove it for live and supply private key/vault.
 
 ## Environment variables
 
@@ -195,7 +195,7 @@ See `.env.example` for the full list, including:
 - Live trading requires valid Hyperliquid credentials.
 - Funding filters rely on current funding rates (no historical funding yet).
 - Set `logging.price_db_path` to persist fetched candles into SQLite for later analysis.
-- 单腿残留自动修复：检测到只剩一条腿时会立即尝试 `repair_residual` 并记录事件。
+- Residual-leg auto-repair: if only one leg remains, the runner attempts `repair_residual` and logs the event.
 
 ## Tests
 
