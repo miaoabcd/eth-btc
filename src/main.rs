@@ -27,6 +27,7 @@ use eth_btc_strategy::execution::{
 };
 use eth_btc_strategy::funding::{FundingFetcher, HyperliquidFundingSource};
 use eth_btc_strategy::logging::{BarLogFileWriter, TradeLogFileWriter};
+use eth_btc_strategy::runtime::backfill::ensure_price_history;
 use eth_btc_strategy::runtime::{LiveRunner, StateStoreWriter, StateWriter};
 use eth_btc_strategy::state::{StateStore, recover_state};
 use eth_btc_strategy::storage::{PriceStore, PriceStoreWriter};
@@ -163,6 +164,17 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let price_source = HyperliquidPriceSource::new(base_url.clone());
+    if let Some(db_path) = config.logging.price_db_path.as_ref() {
+        ensure_price_history(
+            &price_source,
+            db_path,
+            config.data.price_field,
+            config.strategy.n_z.max(384),
+            Utc::now(),
+        )
+        .await
+        .context("backfill price history")?;
+    }
     let price_fetcher = PriceFetcher::new(Arc::new(price_source), config.data.price_field);
 
     let funding_fetcher = if disable_funding {

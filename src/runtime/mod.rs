@@ -14,6 +14,7 @@ use crate::funding::FundingFetcher;
 use crate::logging::{BarLogWriter, TradeLogWriter};
 use crate::state::{StateError, StateStore, StrategyState};
 use crate::storage::{PriceBarRecord, PriceBarWriter};
+pub mod backfill;
 
 #[derive(Debug, Error)]
 pub enum RunnerError {
