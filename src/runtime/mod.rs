@@ -112,6 +112,10 @@ impl LiveRunner {
         self
     }
 
+    pub fn engine_mut(&mut self) -> &mut StrategyEngine {
+        &mut self.engine
+    }
+
     pub async fn run_once(&mut self) -> Result<StrategyOutcome, RunnerError> {
         let now = (self.now)();
         self.run_once_at(now).await

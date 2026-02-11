@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use thiserror::Error;
 
-use crate::config::{CapitalMode, Config, Symbol};
+use crate::config::{CapitalMode, Config, PriceField, Symbol};
 use crate::core::TradeDirection;
 use crate::core::pipeline::SignalPipeline;
 use crate::execution::{ExecutionEngine, OrderRequest, OrderSide};
@@ -10,6 +10,7 @@ use crate::funding::{FundingRate, apply_funding_controls, estimate_funding_cost}
 use crate::logging::{BarLog, LogEvent, TradeEvent, TradeLog};
 use crate::position::{PositionError, SizeConverter, compute_capital, risk_parity_weights};
 use crate::state::{PositionLeg, PositionSnapshot, StateMachine, StrategyState, StrategyStatus};
+use crate::storage::PriceBarRecord;
 use tracing::warn;
 
 #[derive(Debug, Clone)]
@@ -35,6 +36,8 @@ pub struct StrategyOutcome {
 pub enum StrategyError {
     #[error("indicator error: {0}")]
     Indicator(String),
+    #[error("data error: {0}")]
+    Data(String),
     #[error("execution error: {0}")]
     Execution(String),
     #[error("position error: {0}")]
@@ -80,6 +83,52 @@ impl StrategyEngine {
         self.state_machine
             .hydrate(state)
             .map_err(|err| StrategyError::Position(err.to_string()))
+    }
+
+    pub fn warm_up_with_records(
+        &mut self,
+        records: &[PriceBarRecord],
+    ) -> Result<(), StrategyError> {
+        let mut sorted = records.to_vec();
+        sorted.sort_by_key(|r| r.timestamp);
+        for record in sorted {
+            self.state_machine.update(record.timestamp);
+            let eth_price = select_price(
+                self.config.data.price_field,
+                record.eth_mid,
+                record.eth_mark,
+                record.eth_close,
+            )
+            .ok_or_else(|| {
+                StrategyError::Data(format!(
+                    "missing eth price in warmup at {}",
+                    record.timestamp
+                ))
+            })?;
+            let btc_price = select_price(
+                self.config.data.price_field,
+                record.btc_mid,
+                record.btc_mark,
+                record.btc_close,
+            )
+            .ok_or_else(|| {
+                StrategyError::Data(format!(
+                    "missing btc price in warmup at {}",
+                    record.timestamp
+                ))
+            })?;
+            let _ = self
+                .pipeline
+                .update(
+                    record.timestamp,
+                    eth_price,
+                    btc_price,
+                    self.state_machine.state().status,
+                    self.state_machine.state().position.as_ref(),
+                )
+                .map_err(|err| StrategyError::Indicator(err.to_string()))?;
+        }
+        Ok(())
     }
 
     pub async fn process_bar(
@@ -456,5 +505,18 @@ impl StrategyEngine {
             OrderSide::Buy => price * (Decimal::ONE + slippage),
             OrderSide::Sell => price * (Decimal::ONE - slippage),
         }
+    }
+}
+
+fn select_price(
+    field: PriceField,
+    mid: Option<Decimal>,
+    mark: Option<Decimal>,
+    close: Option<Decimal>,
+) -> Option<Decimal> {
+    match field {
+        PriceField::Mid => mid.or(mark).or(close),
+        PriceField::Mark => mark.or(mid).or(close),
+        PriceField::Close => close.or(mid).or(mark),
     }
 }

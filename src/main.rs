@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, anyhow};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use clap::Parser;
 use tokio::sync::watch;
 use tracing::{info, warn};
@@ -20,7 +20,7 @@ use eth_btc_strategy::backtest::{
 use eth_btc_strategy::cli::{Cli, Command};
 use eth_btc_strategy::config::{CapitalMode, load_config};
 use eth_btc_strategy::core::strategy::StrategyEngine;
-use eth_btc_strategy::data::{HyperliquidPriceSource, PriceFetcher};
+use eth_btc_strategy::data::{HyperliquidPriceSource, PriceFetcher, align_to_bar_close};
 use eth_btc_strategy::execution::{
     ExecutionEngine, LiveOrderExecutor, OrderExecutor, OrderRequest, PaperOrderExecutor,
     RetryConfig,
@@ -165,11 +165,12 @@ async fn main() -> anyhow::Result<()> {
 
     let price_source = HyperliquidPriceSource::new(base_url.clone());
     if let Some(db_path) = config.logging.price_db_path.as_ref() {
+        let warmup_bars = config.strategy.n_z.max(config.position.n_vol).max(384);
         ensure_price_history(
             &price_source,
             db_path,
             config.data.price_field,
-            config.strategy.n_z.max(config.position.n_vol).max(384),
+            warmup_bars,
             Utc::now(),
         )
         .await
@@ -244,6 +245,20 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let mut runner = LiveRunner::new(engine, price_fetcher, funding_fetcher);
+    if let Some(db_path) = config.logging.price_db_path.as_ref() {
+        let warmup_bars = config.strategy.n_z.max(config.position.n_vol).max(384);
+        let end = align_to_bar_close(Utc::now()).context("align warmup end")?;
+        let span_secs = 900 * (warmup_bars.saturating_sub(1)) as i64;
+        let start = end - ChronoDuration::seconds(span_secs);
+        let store = PriceStore::new(db_path).context("open price db for warmup")?;
+        let records = store
+            .load_range(start, end)
+            .context("load warmup records")?;
+        runner
+            .engine_mut()
+            .warm_up_with_records(&records)
+            .context("warm up pipeline")?;
+    }
     if let Some(source) = account_source {
         runner = runner.with_account_source(source);
     }
