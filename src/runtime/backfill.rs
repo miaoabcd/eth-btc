@@ -15,7 +15,10 @@ pub enum BackfillError {
     #[error("storage error: {0}")]
     Storage(#[from] PriceStoreError),
     #[error("missing bar for {symbol:?} at {timestamp}")]
-    MissingBar { symbol: Symbol, timestamp: DateTime<Utc> },
+    MissingBar {
+        symbol: Symbol,
+        timestamp: DateTime<Utc>,
+    },
 }
 
 pub async fn ensure_price_history(
@@ -52,16 +55,24 @@ pub async fn ensure_price_history(
 
     for idx in 0..bars_needed {
         let ts = start + Duration::seconds(900 * idx as i64);
-        let eth_bar = eth_map
-            .get(&ts)
-            .ok_or(BackfillError::MissingBar { symbol: Symbol::EthPerp, timestamp: ts })?;
-        let btc_bar = btc_map
-            .get(&ts)
-            .ok_or(BackfillError::MissingBar { symbol: Symbol::BtcPerp, timestamp: ts })?;
+        let eth_bar = eth_map.get(&ts).ok_or(BackfillError::MissingBar {
+            symbol: Symbol::EthPerp,
+            timestamp: ts,
+        })?;
+        let btc_bar = btc_map.get(&ts).ok_or(BackfillError::MissingBar {
+            symbol: Symbol::BtcPerp,
+            timestamp: ts,
+        })?;
         let eth_price = effective_price(price_field, eth_bar.mid, eth_bar.mark, eth_bar.close)
-            .ok_or(BackfillError::MissingBar { symbol: Symbol::EthPerp, timestamp: ts })?;
+            .ok_or(BackfillError::MissingBar {
+                symbol: Symbol::EthPerp,
+                timestamp: ts,
+            })?;
         let btc_price = effective_price(price_field, btc_bar.mid, btc_bar.mark, btc_bar.close)
-            .ok_or(BackfillError::MissingBar { symbol: Symbol::BtcPerp, timestamp: ts })?;
+            .ok_or(BackfillError::MissingBar {
+                symbol: Symbol::BtcPerp,
+                timestamp: ts,
+            })?;
         let record = PriceBarRecord {
             timestamp: ts,
             eth_mid: eth_bar.mid.or(Some(eth_price)),

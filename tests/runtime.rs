@@ -9,7 +9,7 @@ use tokio::sync::watch;
 use eth_btc_strategy::account::MockAccountSource;
 use eth_btc_strategy::config::{CapitalMode, Config, SigmaFloorMode, Symbol};
 use eth_btc_strategy::core::strategy::StrategyEngine;
-use eth_btc_strategy::data::{DataError, MockPriceSource, PriceBar, PriceFetcher};
+use eth_btc_strategy::data::{DataError, MockPriceSource, PriceBar, PriceFetcher, PriceSource};
 use eth_btc_strategy::execution::{ExecutionEngine, PaperOrderExecutor, RetryConfig};
 use eth_btc_strategy::funding::{FundingFetcher, FundingRate, MockFundingSource};
 use eth_btc_strategy::logging::{BarLogWriter, TradeLog, TradeLogWriter};

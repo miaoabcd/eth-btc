@@ -4,7 +4,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use thiserror::Error;
 use tokio::sync::{Mutex, watch};
-use tokio::time::interval;
+use tokio::time::{interval, sleep};
 use tracing::{info, warn};
 
 use crate::account::AccountBalanceSource;
@@ -121,7 +121,31 @@ impl LiveRunner {
         &mut self,
         timestamp: DateTime<Utc>,
     ) -> Result<StrategyOutcome, RunnerError> {
-        let bars_snapshot = self.price_fetcher.fetch_pair_bars(timestamp).await?;
+        const MAX_FETCH_RETRIES: usize = 3;
+        const FETCH_RETRY_DELAY_MS: u64 = 3000;
+
+        let mut last_error: Option<DataError> = None;
+        let mut bars_snapshot = None;
+        for attempt in 0..MAX_FETCH_RETRIES {
+            match self.price_fetcher.fetch_pair_bars(timestamp).await {
+                Ok(snapshot) => {
+                    bars_snapshot = Some(snapshot);
+                    break;
+                }
+                Err(err) => {
+                    last_error = Some(err);
+                    if attempt + 1 < MAX_FETCH_RETRIES {
+                        sleep(std::time::Duration::from_millis(FETCH_RETRY_DELAY_MS)).await;
+                        continue;
+                    }
+                }
+            }
+        }
+        let bars_snapshot = bars_snapshot.ok_or_else(|| {
+            RunnerError::Data(
+                last_error.unwrap_or(DataError::MissingData("missing price snapshot".to_string())),
+            )
+        })?;
         let snapshot = bars_snapshot.snapshot.clone();
 
         let funding = if let Some(fetcher) = &self.funding_fetcher {
