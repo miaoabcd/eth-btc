@@ -10,6 +10,7 @@ use crate::config::Symbol;
 use crate::data::{
     DataError, HttpClient, HyperliquidPriceSource, PriceBar, PriceSource, align_to_bar_close,
 };
+use crate::storage::{PriceBarRecord, PriceStore};
 
 #[derive(Debug, Error)]
 pub enum DownloadError {
@@ -87,19 +88,49 @@ impl HyperliquidDownloader {
     fn map_prices(bars: Vec<PriceBar>) -> Result<BTreeMap<DateTime<Utc>, Decimal>, DownloadError> {
         let mut map = BTreeMap::new();
         for bar in bars {
-            let price = bar
-                .close
-                .or(bar.mid)
-                .or(bar.mark)
-                .ok_or_else(|| {
-                    DownloadError::MissingPrice(format!(
-                        "{:?} at {}",
-                        bar.symbol,
-                        bar.timestamp.to_rfc3339()
-                    ))
-                })?;
+            let price = bar.close.or(bar.mid).or(bar.mark).ok_or_else(|| {
+                DownloadError::MissingPrice(format!(
+                    "{:?} at {}",
+                    bar.symbol,
+                    bar.timestamp.to_rfc3339()
+                ))
+            })?;
             map.insert(bar.timestamp, price);
         }
         Ok(map)
+    }
+}
+
+pub fn write_bars_to_output(
+    bars: &[BacktestBar],
+    path: &std::path::Path,
+) -> Result<(), DownloadError> {
+    if path.extension().and_then(|ext| ext.to_str()) == Some("sqlite") {
+        let store = PriceStore::new(path.to_string_lossy().as_ref())
+            .map_err(|err| DownloadError::Data(DataError::Http(err.to_string())))?;
+        for bar in bars {
+            let record = PriceBarRecord {
+                timestamp: bar.timestamp,
+                eth_mid: Some(bar.eth_price),
+                eth_mark: None,
+                eth_close: None,
+                btc_mid: Some(bar.btc_price),
+                btc_mark: None,
+                btc_close: None,
+                funding_eth: bar.funding_eth,
+                funding_btc: bar.funding_btc,
+                funding_interval_hours: None,
+            };
+            store
+                .save(&record)
+                .map_err(|err| DownloadError::Data(DataError::Http(err.to_string())))?;
+        }
+        Ok(())
+    } else {
+        let payload = serde_json::to_string_pretty(bars)
+            .map_err(|err| DownloadError::Data(DataError::Http(err.to_string())))?;
+        std::fs::write(path, payload)
+            .map_err(|err| DownloadError::Data(DataError::Http(err.to_string())))?;
+        Ok(())
     }
 }

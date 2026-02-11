@@ -11,25 +11,25 @@ use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 use alloy_signer_local::PrivateKeySigner;
-use eth_btc_strategy::backtest::{
-    BacktestEngine, export_equity_csv, export_metrics_json, export_trades_csv,
-    load_backtest_bars, load_backtest_bars_from_db,
-};
 use eth_btc_strategy::account::HyperliquidAccountSource;
+use eth_btc_strategy::backtest::download::{HyperliquidDownloader, write_bars_to_output};
+use eth_btc_strategy::backtest::{
+    BacktestEngine, export_equity_csv, export_metrics_json, export_trades_csv, load_backtest_bars,
+    load_backtest_bars_from_db,
+};
 use eth_btc_strategy::cli::{Cli, Command};
 use eth_btc_strategy::config::{CapitalMode, load_config};
 use eth_btc_strategy::core::strategy::StrategyEngine;
 use eth_btc_strategy::data::{HyperliquidPriceSource, PriceFetcher};
-use eth_btc_strategy::backtest::download::HyperliquidDownloader;
 use eth_btc_strategy::execution::{
     ExecutionEngine, LiveOrderExecutor, OrderExecutor, OrderRequest, PaperOrderExecutor,
     RetryConfig,
 };
 use eth_btc_strategy::funding::{FundingFetcher, HyperliquidFundingSource};
 use eth_btc_strategy::logging::{BarLogFileWriter, TradeLogFileWriter};
-use eth_btc_strategy::storage::{PriceStore, PriceStoreWriter};
 use eth_btc_strategy::runtime::{LiveRunner, StateStoreWriter, StateWriter};
 use eth_btc_strategy::state::{StateStore, recover_state};
+use eth_btc_strategy::storage::{PriceStore, PriceStoreWriter};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -91,8 +91,8 @@ async fn main() -> anyhow::Result<()> {
                     export_equity_csv(&dir.join("equity.csv"), &result.equity_curve)
                         .context("write equity")?;
                 } else {
-                    let payload = serde_json::to_string_pretty(&result.metrics)
-                        .context("format metrics")?;
+                    let payload =
+                        serde_json::to_string_pretty(&result.metrics).context("format metrics")?;
                     println!("{payload}");
                 }
                 return Ok(());
@@ -105,9 +105,7 @@ async fn main() -> anyhow::Result<()> {
                     .fetch_backtest_bars(start, end)
                     .await
                     .context("download bars")?;
-                let payload =
-                    serde_json::to_string_pretty(&bars).context("serialize backtest bars")?;
-                std::fs::write(&args.output, payload).context("write output file")?;
+                write_bars_to_output(&bars, &args.output).context("write output")?;
                 info!(count = bars.len(), path = %args.output.display(), "download complete");
                 return Ok(());
             }
@@ -142,10 +140,8 @@ async fn main() -> anyhow::Result<()> {
                     executor = executor.with_vault_address(vault);
                 }
                 if let Some(leverage) = config.execution.leverage {
-                    executor = executor.with_leverage_config(
-                        leverage,
-                        config.execution.margin_mode.is_cross(),
-                    );
+                    executor = executor
+                        .with_leverage_config(leverage, config.execution.margin_mode.is_cross());
                 }
                 let order = OrderRequest {
                     symbol: args.symbol,
@@ -210,10 +206,8 @@ async fn main() -> anyhow::Result<()> {
             executor = executor.with_vault_address(vault);
         }
         if let Some(leverage) = config.execution.leverage {
-            executor = executor.with_leverage_config(
-                leverage,
-                config.execution.margin_mode.is_cross(),
-            );
+            executor =
+                executor.with_leverage_config(leverage, config.execution.margin_mode.is_cross());
         }
         (
             ExecutionEngine::new(Arc::new(executor), RetryConfig::fast()),
@@ -245,21 +239,15 @@ async fn main() -> anyhow::Result<()> {
         runner = runner.with_state_writer(writer);
     }
     if let Some(path) = config.logging.stats_path.as_ref() {
-        let format = config
-            .logging
-            .stats_format
-            .unwrap_or(config.logging.format);
-        let writer = BarLogFileWriter::new(PathBuf::from(path), format)
-            .context("create stats logger")?;
+        let format = config.logging.stats_format.unwrap_or(config.logging.format);
+        let writer =
+            BarLogFileWriter::new(PathBuf::from(path), format).context("create stats logger")?;
         runner = runner.with_stats_writer(Arc::new(writer));
     }
     if let Some(path) = config.logging.trade_path.as_ref() {
-        let format = config
-            .logging
-            .trade_format
-            .unwrap_or(config.logging.format);
-        let writer = TradeLogFileWriter::new(PathBuf::from(path), format)
-            .context("create trade logger")?;
+        let format = config.logging.trade_format.unwrap_or(config.logging.format);
+        let writer =
+            TradeLogFileWriter::new(PathBuf::from(path), format).context("create trade logger")?;
         runner = runner.with_trade_writer(Arc::new(writer));
     }
     if let Some(path) = config.logging.price_db_path.as_ref() {
