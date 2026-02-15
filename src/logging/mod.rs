@@ -42,6 +42,8 @@ pub struct TradeLog {
     pub entry_time: DateTime<Utc>,
     pub entry_eth_price: Decimal,
     pub entry_btc_price: Decimal,
+    pub realized_pnl: Decimal,
+    pub cumulative_realized_pnl: Decimal,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -64,6 +66,7 @@ pub struct BarLog {
     pub funding_btc: Option<Decimal>,
     pub funding_cost_est: Option<Decimal>,
     pub funding_skip: Option<bool>,
+    pub unrealized_pnl: Decimal,
     pub state: StrategyStatus,
     pub position: Option<PositionSnapshot>,
     pub events: Vec<LogEvent>,
@@ -97,11 +100,12 @@ impl LogFormatter {
             .map(|value| value.to_string())
             .unwrap_or_else(|| "NA".to_string());
         format!(
-            "[{}] ETH={} BTC={} Z={} STATE={:?}",
+            "[{}] ETH={} BTC={} Z={} UPNL={} STATE={:?}",
             bar.timestamp.to_rfc3339(),
             eth,
             btc,
             z,
+            bar.unrealized_pnl,
             bar.state
         )
     }
@@ -152,7 +156,7 @@ impl TradeLogFormatter {
 
     pub fn format_text(&self, log: &TradeLog) -> String {
         format!(
-            "[{}] EVENT={:?} DIR={:?} ETH_QTY={} BTC_QTY={} ETH_PX={} BTC_PX={} ENTRY_TIME={} ENTRY_ETH_PX={} ENTRY_BTC_PX={}",
+            "[{}] EVENT={:?} DIR={:?} ETH_QTY={} BTC_QTY={} ETH_PX={} BTC_PX={} ENTRY_TIME={} ENTRY_ETH_PX={} ENTRY_BTC_PX={} REALIZED_PNL={} CUM_REALIZED_PNL={}",
             log.timestamp.to_rfc3339(),
             log.event,
             log.direction,
@@ -162,7 +166,9 @@ impl TradeLogFormatter {
             log.btc_price,
             log.entry_time.to_rfc3339(),
             log.entry_eth_price,
-            log.entry_btc_price
+            log.entry_btc_price,
+            log.realized_pnl,
+            log.cumulative_realized_pnl
         )
     }
 }

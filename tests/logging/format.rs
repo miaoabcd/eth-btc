@@ -25,6 +25,7 @@ fn log_format_outputs_json_and_text() {
         funding_btc: None,
         funding_cost_est: None,
         funding_skip: None,
+        unrealized_pnl: dec!(0.12),
         state: StrategyStatus::Flat,
         position: None,
         events: vec![],
@@ -37,4 +38,5 @@ fn log_format_outputs_json_and_text() {
     assert!(json.contains("\"eth_price\""));
     assert!(text.contains("ETH"));
     assert!(text.contains("Z"));
+    assert!(text.contains("UPNL"));
 }

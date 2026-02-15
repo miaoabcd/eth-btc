@@ -51,6 +51,7 @@ pub struct StrategyEngine {
     pipeline: SignalPipeline,
     state_machine: StateMachine,
     execution: ExecutionEngine,
+    cumulative_realized_pnl: Decimal,
 }
 
 impl std::fmt::Debug for StrategyEngine {
@@ -72,6 +73,7 @@ impl StrategyEngine {
             state_machine: StateMachine::new(config.risk.clone()),
             config,
             execution,
+            cumulative_realized_pnl: Decimal::ZERO,
         })
     }
 
@@ -396,6 +398,8 @@ impl StrategyEngine {
                 entry_time: bar.timestamp,
                 entry_eth_price: bar.eth_price,
                 entry_btc_price: bar.btc_price,
+                realized_pnl: Decimal::ZERO,
+                cumulative_realized_pnl: self.cumulative_realized_pnl,
             });
         }
 
@@ -422,6 +426,8 @@ impl StrategyEngine {
                 .close_pair(eth_order, btc_order)
                 .await
                 .map_err(|err| StrategyError::Execution(err.to_string()))?;
+            let realized_pnl = compute_position_pnl(&position, bar.eth_price, bar.btc_price);
+            self.cumulative_realized_pnl += realized_pnl;
             trade_logs.push(TradeLog {
                 timestamp: bar.timestamp,
                 event: TradeEvent::Exit(exit_signal.reason),
@@ -433,6 +439,8 @@ impl StrategyEngine {
                 entry_time: position.entry_time,
                 entry_eth_price: position.eth.avg_price,
                 entry_btc_price: position.btc.avg_price,
+                realized_pnl,
+                cumulative_realized_pnl: self.cumulative_realized_pnl,
             });
             self.state_machine
                 .exit(exit_signal.reason, bar.timestamp)
@@ -469,6 +477,13 @@ impl StrategyEngine {
         funding_skip: Option<bool>,
         trade_logs: Vec<TradeLog>,
     ) -> StrategyOutcome {
+        let unrealized_pnl = self
+            .state_machine
+            .state()
+            .position
+            .as_ref()
+            .map(|position| compute_position_pnl(position, bar.eth_price, bar.btc_price))
+            .unwrap_or(Decimal::ZERO);
         StrategyOutcome {
             state: self.state_machine.state().status,
             events: events.clone(),
@@ -491,6 +506,7 @@ impl StrategyEngine {
                 funding_btc: bar.funding_btc,
                 funding_cost_est,
                 funding_skip,
+                unrealized_pnl,
                 state: self.state_machine.state().status,
                 position: self.state_machine.state().position.clone(),
                 events,
@@ -519,4 +535,10 @@ fn select_price(
         PriceField::Mark => mark.or(mid).or(close),
         PriceField::Close => close.or(mid).or(mark),
     }
+}
+
+fn compute_position_pnl(position: &PositionSnapshot, eth_price: Decimal, btc_price: Decimal) -> Decimal {
+    let eth_pnl = position.eth.qty * (eth_price - position.eth.avg_price);
+    let btc_pnl = position.btc.qty * (btc_price - position.btc.avg_price);
+    eth_pnl + btc_pnl
 }

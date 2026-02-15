@@ -386,8 +386,13 @@ async fn strategy_engine_emits_trade_logs_on_entry_and_exit() {
     match &entry_outcome.trade_logs[0] {
         TradeLog {
             event: TradeEvent::Entry,
+            realized_pnl,
+            cumulative_realized_pnl,
             ..
-        } => {}
+        } => {
+            assert_eq!(*realized_pnl, dec!(0));
+            assert_eq!(*cumulative_realized_pnl, dec!(0));
+        }
         other => panic!("unexpected entry trade log {other:?}"),
     }
 
@@ -406,10 +411,69 @@ async fn strategy_engine_emits_trade_logs_on_entry_and_exit() {
     match &exit_outcome.trade_logs[0] {
         TradeLog {
             event: TradeEvent::Exit(_),
+            realized_pnl,
+            cumulative_realized_pnl,
             ..
-        } => {}
+        } => {
+            assert!(*realized_pnl > dec!(0));
+            assert_eq!(*cumulative_realized_pnl, *realized_pnl);
+        }
         other => panic!("unexpected exit trade log {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn strategy_engine_populates_unrealized_pnl_while_holding_position() {
+    let mut config = Config::default();
+    config.strategy.n_z = 3;
+    config.position.n_vol = 1;
+    config.strategy.entry_z = dec!(0.5);
+    config.strategy.tp_z = dec!(0);
+    config.strategy.sl_z = dec!(1000);
+    config.position.c_value = Some(dec!(100));
+
+    let execution =
+        ExecutionEngine::new(std::sync::Arc::new(PaperOrderExecutor), RetryConfig::fast());
+    let mut engine = StrategyEngine::new(config, execution).unwrap();
+
+    for offset in [0, 900, 1800] {
+        let bar = eth_btc_strategy::core::strategy::StrategyBar {
+            timestamp: Utc.timestamp_opt(offset, 0).unwrap(),
+            eth_price: dec!(100),
+            btc_price: dec!(100),
+            equity: None,
+            funding_eth: None,
+            funding_btc: None,
+            funding_interval_hours: None,
+        };
+        engine.process_bar(bar).await.unwrap();
+    }
+
+    let entry_bar = eth_btc_strategy::core::strategy::StrategyBar {
+        timestamp: Utc.timestamp_opt(2700, 0).unwrap(),
+        eth_price: dec!(271.8281828),
+        btc_price: dec!(100),
+        equity: None,
+        funding_eth: None,
+        funding_btc: None,
+        funding_interval_hours: None,
+    };
+    let entry_outcome = engine.process_bar(entry_bar).await.unwrap();
+    assert_eq!(entry_outcome.state, StrategyStatus::InPosition);
+    assert_eq!(entry_outcome.bar_log.unrealized_pnl, dec!(0));
+
+    let holding_bar = eth_btc_strategy::core::strategy::StrategyBar {
+        timestamp: Utc.timestamp_opt(3600, 0).unwrap(),
+        eth_price: dec!(250),
+        btc_price: dec!(105),
+        equity: None,
+        funding_eth: None,
+        funding_btc: None,
+        funding_interval_hours: None,
+    };
+    let holding_outcome = engine.process_bar(holding_bar).await.unwrap();
+    assert_eq!(holding_outcome.state, StrategyStatus::InPosition);
+    assert!(holding_outcome.bar_log.unrealized_pnl > dec!(0));
 }
 
 #[tokio::test]

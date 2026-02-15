@@ -26,6 +26,7 @@ fn bar_log_contains_required_fields() {
         funding_btc: Some(dec!(0.02)),
         funding_cost_est: Some(dec!(5)),
         funding_skip: Some(false),
+        unrealized_pnl: dec!(1.23),
         state: StrategyStatus::Flat,
         position: None,
         events: vec![LogEvent::Exit(ExitReason::TakeProfit)],
@@ -36,6 +37,7 @@ fn bar_log_contains_required_fields() {
     assert!(json.get("eth_price").is_some());
     assert!(json.get("btc_price").is_some());
     assert!(json.get("zscore").is_some());
+    assert!(json.get("unrealized_pnl").is_some());
     assert!(json.get("state").is_some());
     assert!(json.get("events").is_some());
 }

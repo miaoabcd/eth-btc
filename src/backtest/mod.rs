@@ -272,6 +272,17 @@ impl BacktestEngine {
                 equity,
             });
 
+            let unrealized_pnl = state_machine
+                .state()
+                .position
+                .as_ref()
+                .map(|position| {
+                    let eth_pnl = position.eth.qty * (bar.eth_price - position.eth.avg_price);
+                    let btc_pnl = position.btc.qty * (bar.btc_price - position.btc.avg_price);
+                    eth_pnl + btc_pnl
+                })
+                .unwrap_or(Decimal::ZERO);
+
             bar_logs.push(BarLog {
                 timestamp: bar.timestamp,
                 eth_price: Some(bar.eth_price),
@@ -291,6 +302,7 @@ impl BacktestEngine {
                 funding_btc: bar.funding_btc,
                 funding_cost_est: None,
                 funding_skip: None,
+                unrealized_pnl,
                 state: state_machine.state().status,
                 position: state_machine.state().position.clone(),
                 events: Vec::new(),
