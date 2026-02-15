@@ -426,7 +426,34 @@ impl StrategyEngine {
                 .close_pair(eth_order, btc_order)
                 .await
                 .map_err(|err| StrategyError::Execution(err.to_string()))?;
-            let realized_pnl = compute_position_pnl(&position, bar.eth_price, bar.btc_price);
+            let mut realized_pnl = compute_position_pnl(&position, bar.eth_price, bar.btc_price);
+            if let (Some(funding_eth), Some(funding_btc)) = (bar.funding_eth, bar.funding_btc) {
+                let interval_hours = bar
+                    .funding_interval_hours
+                    .filter(|value| *value > 0)
+                    .unwrap_or(8);
+                let holding_hours = (bar.timestamp - position.entry_time).num_hours().max(0) as u32;
+                let estimate = estimate_funding_cost(
+                    position.direction,
+                    position.eth.notional,
+                    position.btc.notional,
+                    &FundingRate {
+                        symbol: Symbol::EthPerp,
+                        rate: funding_eth,
+                        timestamp: bar.timestamp,
+                        interval_hours,
+                    },
+                    &FundingRate {
+                        symbol: Symbol::BtcPerp,
+                        rate: funding_btc,
+                        timestamp: bar.timestamp,
+                        interval_hours,
+                    },
+                    holding_hours,
+                )
+                .map_err(|err| StrategyError::Funding(err.to_string()))?;
+                realized_pnl -= estimate.cost_est;
+            }
             self.cumulative_realized_pnl += realized_pnl;
             trade_logs.push(TradeLog {
                 timestamp: bar.timestamp,

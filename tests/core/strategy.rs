@@ -7,7 +7,7 @@ use eth_btc_strategy::core::strategy::StrategyEngine;
 use eth_btc_strategy::execution::{
     ExecutionEngine, OrderExecutor, OrderRequest, PaperOrderExecutor, RetryConfig,
 };
-use eth_btc_strategy::funding::estimate_funding_cost;
+use eth_btc_strategy::funding::{FundingRate, estimate_funding_cost};
 use eth_btc_strategy::logging::{LogEvent, TradeEvent, TradeLog};
 use eth_btc_strategy::state::{PositionLeg, PositionSnapshot, StrategyState, StrategyStatus};
 
@@ -474,6 +474,82 @@ async fn strategy_engine_populates_unrealized_pnl_while_holding_position() {
     let holding_outcome = engine.process_bar(holding_bar).await.unwrap();
     assert_eq!(holding_outcome.state, StrategyStatus::InPosition);
     assert!(holding_outcome.bar_log.unrealized_pnl > dec!(0));
+}
+
+#[tokio::test]
+async fn strategy_engine_exit_realized_pnl_deducts_funding_cost() {
+    let mut config = Config::default();
+    config.strategy.n_z = 3;
+    config.position.n_vol = 1;
+    config.strategy.entry_z = dec!(0.5);
+    config.strategy.tp_z = dec!(0.45);
+    config.strategy.sl_z = dec!(2.0);
+    config.position.c_value = Some(dec!(100));
+
+    let execution =
+        ExecutionEngine::new(std::sync::Arc::new(PaperOrderExecutor), RetryConfig::fast());
+    let mut engine = StrategyEngine::new(config, execution).unwrap();
+
+    for offset in [0, 900, 1800] {
+        let bar = eth_btc_strategy::core::strategy::StrategyBar {
+            timestamp: Utc.timestamp_opt(offset, 0).unwrap(),
+            eth_price: dec!(100),
+            btc_price: dec!(100),
+            equity: None,
+            funding_eth: None,
+            funding_btc: None,
+            funding_interval_hours: Some(1),
+        };
+        engine.process_bar(bar).await.unwrap();
+    }
+
+    let entry_bar = eth_btc_strategy::core::strategy::StrategyBar {
+        timestamp: Utc.timestamp_opt(2700, 0).unwrap(),
+        eth_price: dec!(271.8281828),
+        btc_price: dec!(100),
+        equity: None,
+        funding_eth: None,
+        funding_btc: None,
+        funding_interval_hours: Some(1),
+    };
+    let entry_outcome = engine.process_bar(entry_bar).await.unwrap();
+    let notional_eth = entry_outcome.bar_log.notional_eth.unwrap();
+    let notional_btc = entry_outcome.bar_log.notional_btc.unwrap();
+
+    let exit_bar = eth_btc_strategy::core::strategy::StrategyBar {
+        timestamp: Utc.timestamp_opt(6300, 0).unwrap(),
+        eth_price: dec!(164.872127),
+        btc_price: dec!(100),
+        equity: None,
+        funding_eth: Some(dec!(0)),
+        funding_btc: Some(dec!(0.01)),
+        funding_interval_hours: Some(1),
+    };
+    let exit_outcome = engine.process_bar(exit_bar.clone()).await.unwrap();
+    let log = &exit_outcome.trade_logs[0];
+    let gross = log.eth_qty * (log.eth_price - log.entry_eth_price)
+        + log.btc_qty * (log.btc_price - log.entry_btc_price);
+    let funding = estimate_funding_cost(
+        log.direction,
+        notional_eth,
+        notional_btc,
+        &FundingRate {
+            symbol: Symbol::EthPerp,
+            rate: dec!(0),
+            timestamp: exit_bar.timestamp,
+            interval_hours: 1,
+        },
+        &FundingRate {
+            symbol: Symbol::BtcPerp,
+            rate: dec!(0.01),
+            timestamp: exit_bar.timestamp,
+            interval_hours: 1,
+        },
+        1,
+    )
+    .unwrap()
+    .cost_est;
+    assert_eq!(log.realized_pnl, gross - funding);
 }
 
 #[tokio::test]
