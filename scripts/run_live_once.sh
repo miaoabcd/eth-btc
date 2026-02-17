@@ -24,20 +24,29 @@ if [[ ! -f "$CONFIG_PATH" ]]; then
   exit 1
 fi
 
+cd "$ROOT_DIR"
+
 {
   echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] run_once start delay=${START_DELAY_SECS}s"
   sleep "$START_DELAY_SECS"
 
+  exec {LOCK_FD}>"$LOCK_PATH"
+
   set +e
-  flock -n "$LOCK_PATH" "$BIN_PATH" --config "$CONFIG_PATH" --once
-  rc=$?
+  flock -n "$LOCK_FD"
+  lock_rc=$?
   set -e
 
-  if [[ "$rc" -eq 1 ]]; then
+  if [[ "$lock_rc" -ne 0 ]]; then
     echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] run_once skipped lock_busy"
     echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] run_once end rc=0"
     exit 0
   fi
+
+  set +e
+  "$BIN_PATH" --config "$CONFIG_PATH" --once
+  rc=$?
+  set -e
 
   echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] run_once end rc=$rc"
   exit "$rc"

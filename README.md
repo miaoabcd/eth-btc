@@ -4,7 +4,7 @@ This repository implements a production-grade ETH/BTC relative value mean revers
 
 ## Modules
 
-- **config**: Typed configuration structs, TOML loading, env/CLI overrides, validation, and baseline defaults.
+- **config**: Typed configuration structs, TOML loading, CLI overrides, validation, and baseline defaults.
 - **cli**: Command-line flags for live runner and backtest subcommand.
 - **data**: Price ingestion via Hyperliquid `/info` candleSnapshot; price field selection (MID/MARK/CLOSE).
 - **funding**: Funding-rate fetcher using Hyperliquid `/info` metaAndAssetCtxs; funding filters/thresholds.
@@ -24,20 +24,26 @@ Configuration is loaded in this order:
 
 1. Built-in defaults
 2. TOML file (via `--config`)
-3. Environment variables (`STRATEGY_*`)
-4. CLI overrides
+3. CLI overrides
 
 Where to put what:
 
 - **config.toml**: full configuration (strategy + runtime + auth).
 - **CLI flags**: optional runtime overrides (`--base-url`, `--state-path`, `--interval-secs`, `--once`, `--paper`, `--disable-funding`).
-- **Environment variables**: not used for config overrides (except `RUST_LOG` for logging).
+- **Environment variables**: only for process environment (for example `RUST_LOG`), not config overrides.
+
+Key behaviors:
+
+- `position.c_mode = "EQUITY_RATIO"` uses account equity from Hyperliquid `marginSummary.totalRawUsd` in live mode.
+- `execution.leverage` is optional. If set, `updateLeverage` is sent before open orders.
+- `funding.modes = ["THRESHOLD"]` is now enforced in entry gating: effective entry threshold becomes `entry_z + k * normalized_funding_cost`.
+- `runtime.once = true` runs one cycle and exits (useful for cron scheduling).
 
 Statistics log:
 
-- 默认 `[logging].stats_path = "stats.log"`，每根 15m 记录 r/μ/σ/σ_eff/Z、权重、名义、funding 等字段（JSON/TEXT 任选，默认 JSON）。
-- 可选 `[logging].trade_path` 记录每次开/平仓事件。
-- 将 `[logging].price_db_path` 设为 `.sqlite` 文件时，实时行情会追加到 SQLite（可供回测读取）。
+- `[logging].stats_path` writes one record per 15m bar (r/mu/sigma/sigma_eff/zscore, weights, notional, funding fields, state, `unrealized_pnl`).
+- `[logging].trade_path` writes per-entry/per-exit records (`realized_pnl`, `cumulative_realized_pnl`).
+- If `[logging].price_db_path` points to `.sqlite`, fetched bars are persisted to SQLite (`price_bars`) and can be reused by backtest.
 
 Quick queries (JSON format examples):
 
@@ -46,13 +52,13 @@ Quick queries (JSON format examples):
 jq -c 'select(.event == "Entry")' trades.log
 
 # Exits with reason
-jq -c 'select(.event | startswith("Exit")) | {timestamp, event, direction, eth_price, btc_price}' trades.log
+jq -c 'select(.event | type == "object" and has("Exit")) | {timestamp, event, direction, eth_price, btc_price}' trades.log
 
 # Last 20 trade records
 tail -n 20 trades.log | jq -c '.'
 ```
 
-See `config.toml.example` and `.env.example` for all available settings.
+See `config.toml.example` for all available settings.
 
 ## Usage
 
@@ -81,9 +87,9 @@ cargo run --release -- download \
   --output ./data/hyperliquid_bars.json
 ```
 
-Output：
-- 以 `.json` 结尾 → 写 JSON 数组（15m bar）。
-- 以 `.sqlite` 结尾 → 直接写入 SQLite（表 `price_bars`，可用 backtest `--db` 读取）。
+Output:
+- `.json` suffix: writes a JSON array of 15m bars.
+- `.sqlite` suffix: writes directly into SQLite table `price_bars` (usable by backtest `--db`).
 
 ### Paper trading (no live orders)
 
@@ -97,13 +103,9 @@ cargo run --release -- \
 
 ### Live trading (Hyperliquid)
 
-Provide a private key and (optional) vault address via env or CLI. The first non-empty key wins.
+Provide a private key and (optional) vault address via config or CLI.
 
 ```bash
-export HYPERLIQUID_PRIVATE_KEY=0xYOUR_PRIVATE_KEY
-# optional
-export HYPERLIQUID_VAULT_ADDRESS=0xVAULT
-
 cargo run --release -- \
   --config ./config.toml \
   --state-path ./state.sqlite \
@@ -117,6 +119,11 @@ cargo run --release -- \
   --private-key 0xYOUR_PRIVATE_KEY \
   --vault-address 0xVAULT
 ```
+
+Credential precedence in live mode:
+
+1. `--private-key` (or legacy `--api-key`)
+2. `auth.private_key` in TOML config
 
 ### Order test (single IOC order)
 
@@ -141,60 +148,54 @@ Add `--reduce-only` to send a reduce-only close, or `--dry-run` to print the ord
 - `--config` + `logging.price_db_path`: enable live price persistence to SQLite
 - Sizing: `position.min_size_policy = "SKIP" | "ADJUST"` (default SKIP; ADJUST bumps to exchange minimums)
 
-### Recommended Deployment (long-running via systemd)
+### Recommended Deployment (cron + --once)
 
 1. Build release binary:
    ```bash
    cargo build --release
    ```
-2. Create runtime directories and logs:
+2. Ensure scripts are executable:
    ```bash
-   mkdir -p /opt/eth-btc /var/log/eth-btc
-   cp target/release/eth_btc_strategy /opt/eth-btc/
-   cp config.toml /opt/eth-btc/
+   chmod +x scripts/run_live_once.sh
    ```
-3. Example unit `/etc/systemd/system/eth-btc.service`:
-   ```
-   [Unit]
-   Description=ETH/BTC Mean Reversion (Hyperliquid)
-   After=network-online.target
-
-   [Service]
-   WorkingDirectory=/opt/eth-btc
-   ExecStart=/opt/eth-btc/eth_btc_strategy --config /opt/eth-btc/config.toml --interval-secs 900
-   Environment=RUST_LOG=info
-   Restart=always
-   RestartSec=5
-   StandardOutput=append:/var/log/eth-btc/stdout.log
-   StandardError=append:/var/log/eth-btc/stderr.log
-
-   [Install]
-   WantedBy=multi-user.target
-   ```
-4. Enable and start:
+3. Install cron schedule:
    ```bash
-   sudo systemctl daemon-reload
-   sudo systemctl enable --now eth-btc.service
+   crontab /home/noone/work/eth-btc/scripts/eth-btc-live.cron
    ```
-5. Logs/data:
-   - `logging.stats_path` / `logging.trade_path`: point to `/var/log/eth-btc/` as needed.
-   - `logging.price_db_path`: e.g. `/opt/eth-btc/data/prices.sqlite` (startup auto-fills missing 15m bars up to `n_z`).
-   - Use `--paper` for simulation only; remove it for live and supply private key/vault.
+4. Verify installed cron:
+   ```bash
+   crontab -l
+   ```
+5. Runtime logs and lock:
+   - Script log: `data/logs/cron-run.log`
+   - Stats log: path from `logging.stats_path`
+   - Trade log: path from `logging.trade_path`
+   - Lock file: `data/locks/trading_job.lock`
+
+`scripts/run_live_once.sh` details:
+
+- Adds `START_DELAY_SECS` (default `10`) before execution.
+- Uses `flock -n` to avoid overlapping runs.
+- Treats lock contention as "skipped" and exits `0`.
+- Supports overrides via env (`BIN_PATH`, `CONFIG_PATH`, `LOCK_PATH`, `LOG_PATH`, `START_DELAY_SECS`, `RUST_LOG`).
+
+If you still prefer systemd long-running mode, run without `--once` and keep `runtime.once = false`.
 
 ## Environment variables
 
-See `.env.example` for the full list, including:
+Config is TOML-first. Runtime environment variables are optional for process behavior, for example:
 
-- `STRATEGY_*` overrides (z-score window, risk, funding, sizing, etc.)
-- `HYPERLIQUID_PRIVATE_KEY`, `HYPERLIQUID_VAULT_ADDRESS`
-- `RUST_LOG` for logging verbosity
+- `RUST_LOG=info`
+- script-only overrides for `run_live_once.sh` (`START_DELAY_SECS`, `LOCK_PATH`, `LOG_PATH`, etc.)
 
 ## Notes
 
 - State persistence uses SQLite and is optional (`--state-path`).
 - Live trading requires valid Hyperliquid credentials.
-- Funding filters rely on current funding rates (no historical funding yet).
+- Funding controls rely on current funding rates (no historical funding series in live loop).
+- Funding `THRESHOLD` mode is active in strategy entry gating: `effective_entry_z = entry_z + funding_threshold_k * normalized_funding_cost`.
 - Set `logging.price_db_path` to persist fetched candles into SQLite for later analysis.
+- Trade log `realized_pnl` (for new exits) deducts estimated funding cost when funding data is available.
 - Residual-leg auto-repair: if only one leg remains, the runner attempts `repair_residual` and logs the event.
 
 ## Tests
