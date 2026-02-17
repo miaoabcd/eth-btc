@@ -142,7 +142,7 @@ impl AccountBalanceSource for HyperliquidAccountSource {
             .http
             .post(
                 &self.endpoint_url(),
-                serde_json::json!({"type": "userState", "user": self.user}),
+                serde_json::json!({"type": "clearinghouseState", "user": self.user}),
             )
             .await?;
         match response.status {
