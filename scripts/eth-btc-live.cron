@@ -1,0 +1,16 @@
+# eth-btc live scheduler (cron import file)
+# Install:
+#   crontab /home/noone/work/eth-btc/scripts/eth-btc-live.cron
+#
+# If you already have other crontab entries:
+#   (crontab -l; cat /home/noone/work/eth-btc/scripts/eth-btc-live.cron) | crontab -
+
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# Every 15 minutes (:00/:15/:30/:45).
+# The script itself already applies START_DELAY_SECS (default 10s).
+*/15 * * * * /home/noone/work/eth-btc/scripts/run_live_once.sh
+
+# Optional: run once after reboot (uncomment if needed).
+# @reboot /bin/bash -lc 'sleep 20; /home/noone/work/eth-btc/scripts/run_live_once.sh'
