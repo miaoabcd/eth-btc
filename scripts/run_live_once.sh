@@ -4,13 +4,14 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN_PATH="${BIN_PATH:-$ROOT_DIR/target/release/eth_btc_strategy}"
 CONFIG_PATH="${CONFIG_PATH:-$ROOT_DIR/config.toml}"
-LOCK_PATH="${LOCK_PATH:-/tmp/eth-btc-live.lock}"
+LOCK_PATH="${LOCK_PATH:-$ROOT_DIR/data/locks/trading_job.lock}"
 LOG_PATH="${LOG_PATH:-$ROOT_DIR/data/logs/cron-run.log}"
 START_DELAY_SECS="${START_DELAY_SECS:-10}"
 
 export RUST_LOG="${RUST_LOG:-info}"
 
 mkdir -p "$(dirname "$LOG_PATH")"
+mkdir -p "$(dirname "$LOCK_PATH")"
 
 if [[ ! -x "$BIN_PATH" ]]; then
   echo "binary not found or not executable: $BIN_PATH" >> "$LOG_PATH"
