@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use thiserror::Error;
 
-use crate::config::{CapitalMode, Config, PriceField, Symbol};
+use crate::config::{CapitalMode, Config, FundingMode, PriceField, Symbol};
 use crate::core::TradeDirection;
 use crate::core::pipeline::SignalPipeline;
 use crate::execution::{ExecutionEngine, OrderRequest, OrderSide};
@@ -256,6 +256,23 @@ impl StrategyEngine {
                 .map_err(|err| StrategyError::Funding(err.to_string()))?;
                 funding_skip = Some(decision.should_skip);
                 if decision.should_skip {
+                    return Ok(self.build_outcome(
+                        bar,
+                        z_snapshot,
+                        vol_snapshot,
+                        events,
+                        w_eth,
+                        w_btc,
+                        Some(notional_eth_value),
+                        Some(notional_btc_value),
+                        funding_cost_est,
+                        funding_skip,
+                        trade_logs,
+                    ));
+                }
+                if self.config.funding.modes.contains(&FundingMode::Threshold)
+                    && signal.zscore.abs() < decision.adjusted_entry_z
+                {
                     return Ok(self.build_outcome(
                         bar,
                         z_snapshot,

@@ -1,7 +1,7 @@
 use chrono::{TimeZone, Utc};
 use rust_decimal_macros::dec;
 
-use eth_btc_strategy::config::{CapitalMode, Config, Symbol};
+use eth_btc_strategy::config::{CapitalMode, Config, FundingMode, Symbol};
 use eth_btc_strategy::core::TradeDirection;
 use eth_btc_strategy::core::strategy::StrategyEngine;
 use eth_btc_strategy::execution::{
@@ -550,6 +550,53 @@ async fn strategy_engine_exit_realized_pnl_deducts_funding_cost() {
     .unwrap()
     .cost_est;
     assert_eq!(log.realized_pnl, gross - funding);
+}
+
+#[tokio::test]
+async fn strategy_engine_threshold_mode_requires_adjusted_threshold_cross() {
+    let mut threshold_cfg = Config::default();
+    threshold_cfg.strategy.n_z = 3;
+    threshold_cfg.position.n_vol = 1;
+    threshold_cfg.strategy.entry_z = dec!(0.5);
+    threshold_cfg.strategy.tp_z = dec!(0.45);
+    threshold_cfg.strategy.sl_z = dec!(20.0);
+    threshold_cfg.position.c_value = Some(dec!(100));
+    threshold_cfg.risk.max_hold_hours = 1;
+    threshold_cfg.funding.modes = vec![FundingMode::Threshold];
+    threshold_cfg.funding.funding_threshold_k = Some(dec!(1000));
+
+    let execution =
+        ExecutionEngine::new(std::sync::Arc::new(PaperOrderExecutor), RetryConfig::fast());
+    let mut engine = StrategyEngine::new(threshold_cfg, execution).unwrap();
+
+    for offset in [0, 900, 1800] {
+        let bar = eth_btc_strategy::core::strategy::StrategyBar {
+            timestamp: Utc.timestamp_opt(offset, 0).unwrap(),
+            eth_price: dec!(100),
+            btc_price: dec!(100),
+            equity: None,
+            funding_eth: None,
+            funding_btc: None,
+            funding_interval_hours: Some(1),
+        };
+        engine.process_bar(bar).await.unwrap();
+    }
+
+    let entry_candidate = eth_btc_strategy::core::strategy::StrategyBar {
+        timestamp: Utc.timestamp_opt(2700, 0).unwrap(),
+        eth_price: dec!(271.8281828),
+        btc_price: dec!(100),
+        equity: None,
+        funding_eth: Some(dec!(0)),
+        funding_btc: Some(dec!(0.01)),
+        funding_interval_hours: Some(1),
+    };
+
+    let first = engine.process_bar(entry_candidate).await.unwrap();
+    assert_eq!(first.state, StrategyStatus::Flat);
+    assert!(first.trade_logs.is_empty());
+    assert!(!first.events.contains(&LogEvent::Entry));
+    assert!(first.bar_log.funding_cost_est.is_some());
 }
 
 #[tokio::test]

@@ -27,15 +27,15 @@ ewma_half_life = 20
 
 [position]
 # capital mode: FIXED_NOTIONAL | EQUITY_RATIO
-c_mode = "FIXED_NOTIONAL"
+c_mode = "EQUITY_RATIO"
 # fixed notional capital (required when c_mode=FIXED_NOTIONAL)
-c_value = 50000
+c_value = 1000
 # equity value (optional; used for paper/backtest or if live balance unavailable)
-# equity_value = 100000
+equity_value = 1000
 # equity ratio multiplier k (required when c_mode=EQUITY_RATIO)
-# equity_ratio_k = 0.1
+equity_ratio_k = 0.7
 # max total notional cap (optional)
-# max_notional = 100000
+max_notional = 1000
 # volatility window length (number of 15m bars)
 n_vol = 672
 # max concurrent position groups (>= 1)
@@ -45,11 +45,11 @@ min_size_policy = "SKIP"
 
 [funding]
 # modes: FILTER | THRESHOLD | SIZE (can combine)
-modes = ["FILTER"]
+modes = ["THRESHOLD"]
 # filter: skip entries if funding cost > threshold
-funding_cost_threshold = 0.001
+funding_cost_threshold = 0.2
 # threshold: increase entry_z by k * normalized funding cost
-funding_threshold_k = 0.5
+funding_threshold_k = 400
 # size: reduce capital by alpha * normalized funding cost
 funding_size_alpha = 0.5
 # minimum capital ratio when size reduction applied (0..1)
@@ -73,9 +73,9 @@ order_type = "MARKET"
 # slippage in bps used for LIMIT pricing
 slippage_bps = 5
 # leverage (optional; if set will call updateLeverage before opening)
-# leverage = 3
+leverage = 3
 # margin mode: CROSS | ISOLATED
-margin_mode = "CROSS"
+margin_mode = "ISOLATED"
 
 [runtime]
 # Hyperliquid API base URL
@@ -83,19 +83,19 @@ base_url = "https://api.hyperliquid.xyz"
 # loop interval in seconds
 interval_secs = 900
 # run a single iteration and exit
-once = false
+once = true
 # use paper executor (no live orders)
 paper = false
 # disable funding filters (ignore funding rates)
 disable_funding = false
 # optional SQLite state path
-# state_path = "state.sqlite"
+state_path = "data/state.sqlite"
 
 [auth]
 # Hyperliquid private key (hex string, 0x...) for live trading
-# private_key = "0xYOUR_PRIVATE_KEY"
+private_key = "0xYOUR_PRIVATE_KEY"
 # optional vault address
-# vault_address = "0xYOUR_VAULT"
+vault_address = "0xYOUR_VAULT"
 
 [logging]
 # log level (tracing subscriber)
@@ -103,15 +103,15 @@ level = "info"
 # log format: JSON | TEXT
 format = "JSON"
 # per-bar statistics log file (optional)
-stats_path = "stats.log"
+stats_path = "data/logs/stats.log"
 # stats log format: JSON | TEXT (defaults to logging.format)
-# stats_format = "JSON"
+stats_format = "JSON"
 # trade log file (optional)
-trade_path = "trades.log"
+trade_path = "data/logs/trades.log"
 # trade log format: JSON | TEXT (defaults to logging.format)
-# trade_format = "JSON"
+trade_format = "JSON"
 # price DB path for persisted candles (optional)
-# price_db_path = "data/prices.sqlite"
+price_db_path = "data/prices.sqlite"
 
 [alerts]
 # webhook URL for alert notifications
