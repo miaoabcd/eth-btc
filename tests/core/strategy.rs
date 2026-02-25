@@ -8,7 +8,7 @@ use eth_btc_strategy::execution::{
     ExecutionEngine, OrderExecutor, OrderRequest, PaperOrderExecutor, RetryConfig,
 };
 use eth_btc_strategy::funding::{FundingRate, estimate_funding_cost};
-use eth_btc_strategy::logging::{LogEvent, TradeEvent, TradeLog};
+use eth_btc_strategy::logging::{EntryBlockReason, LogEvent, TradeEvent, TradeLog};
 use eth_btc_strategy::state::{PositionLeg, PositionSnapshot, StrategyState, StrategyStatus};
 
 #[derive(Default)]
@@ -597,6 +597,10 @@ async fn strategy_engine_threshold_mode_requires_adjusted_threshold_cross() {
     assert!(first.trade_logs.is_empty());
     assert!(!first.events.contains(&LogEvent::Entry));
     assert!(first.bar_log.funding_cost_est.is_some());
+    assert_eq!(
+        first.bar_log.entry_block_reason,
+        Some(EntryBlockReason::FundingThreshold)
+    );
 }
 
 #[tokio::test]
@@ -639,6 +643,10 @@ async fn strategy_engine_skips_entry_below_minimum_size() {
     let outcome = engine.process_bar(entry_bar).await.unwrap();
     assert_eq!(outcome.state, StrategyStatus::Flat);
     assert!(outcome.trade_logs.is_empty());
+    assert_eq!(
+        outcome.bar_log.entry_block_reason,
+        Some(EntryBlockReason::BelowMinSizeEth)
+    );
     let submitted = recorder.submitted.lock().expect("submit lock");
     assert!(submitted.is_empty());
 }

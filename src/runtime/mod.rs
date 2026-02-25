@@ -230,6 +230,8 @@ impl LiveRunner {
         mut shutdown: watch::Receiver<bool>,
     ) -> Result<(), RunnerError> {
         let mut ticker = interval(tick_interval);
+        // Consume the immediate tick; caller can run an explicit first iteration.
+        ticker.tick().await;
         loop {
             tokio::select! {
                 _ = ticker.tick() => {

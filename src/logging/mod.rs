@@ -25,6 +25,17 @@ pub enum LogEvent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum EntryBlockReason {
+    NoCross,
+    VolatilityUnavailable,
+    FundingFilter,
+    FundingThreshold,
+    BelowMinSizeEth,
+    BelowMinSizeBtc,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TradeEvent {
     Entry,
     Exit(ExitReason),
@@ -66,6 +77,7 @@ pub struct BarLog {
     pub funding_btc: Option<Decimal>,
     pub funding_cost_est: Option<Decimal>,
     pub funding_skip: Option<bool>,
+    pub entry_block_reason: Option<EntryBlockReason>,
     pub unrealized_pnl: Decimal,
     pub state: StrategyStatus,
     pub position: Option<PositionSnapshot>,
@@ -99,14 +111,20 @@ impl LogFormatter {
             .zscore
             .map(|value| value.to_string())
             .unwrap_or_else(|| "NA".to_string());
+        let block = bar
+            .entry_block_reason
+            .as_ref()
+            .map(|reason| format!("{reason:?}"))
+            .unwrap_or_else(|| "NONE".to_string());
         format!(
-            "[{}] ETH={} BTC={} Z={} UPNL={} STATE={:?}",
+            "[{}] ETH={} BTC={} Z={} UPNL={} STATE={:?} BLOCK={}",
             bar.timestamp.to_rfc3339(),
             eth,
             btc,
             z,
             bar.unrealized_pnl,
-            bar.state
+            bar.state,
+            block
         )
     }
 }

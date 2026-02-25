@@ -28,6 +28,22 @@ pub fn latest_completed_bar(now: DateTime<Utc>) -> Result<DateTime<Utc>, DataErr
     Ok(aligned - Duration::seconds(BAR_SECS))
 }
 
+pub fn replay_warmup_gap_window(
+    warmed_run_bar: DateTime<Utc>,
+    target_run_bar: DateTime<Utc>,
+) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
+    if target_run_bar <= warmed_run_bar {
+        return None;
+    }
+    let start = warmed_run_bar + Duration::seconds(BAR_SECS);
+    let end = target_run_bar - Duration::seconds(BAR_SECS);
+    if start <= end {
+        Some((start, end))
+    } else {
+        None
+    }
+}
+
 pub async fn ensure_price_history(
     source: &dyn PriceSource,
     db_path: &str,
@@ -177,5 +193,21 @@ mod tests {
         assert_eq!(records.last().expect("last record").timestamp, end);
 
         let _ = fs::remove_file(db_path);
+    }
+
+    #[test]
+    fn replay_warmup_gap_window_returns_missing_middle_range() {
+        let warm = ts(2026, 2, 17, 2, 15, 0);
+        let target = ts(2026, 2, 17, 2, 45, 0);
+        let gap = replay_warmup_gap_window(warm, target).expect("gap exists");
+        assert_eq!(gap.0, ts(2026, 2, 17, 2, 30, 0));
+        assert_eq!(gap.1, ts(2026, 2, 17, 2, 30, 0));
+    }
+
+    #[test]
+    fn replay_warmup_gap_window_is_none_for_adjacent_bars() {
+        let warm = ts(2026, 2, 17, 2, 15, 0);
+        let target = ts(2026, 2, 17, 2, 30, 0);
+        assert_eq!(replay_warmup_gap_window(warm, target), None);
     }
 }

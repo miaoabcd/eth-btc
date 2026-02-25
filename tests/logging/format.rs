@@ -25,6 +25,7 @@ fn log_format_outputs_json_and_text() {
         funding_btc: None,
         funding_cost_est: None,
         funding_skip: None,
+        entry_block_reason: None,
         unrealized_pnl: dec!(0.12),
         state: StrategyStatus::Flat,
         position: None,

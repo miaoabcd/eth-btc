@@ -7,7 +7,7 @@ use crate::core::TradeDirection;
 use crate::core::pipeline::SignalPipeline;
 use crate::execution::{ExecutionEngine, OrderRequest, OrderSide};
 use crate::funding::{FundingRate, apply_funding_controls, estimate_funding_cost};
-use crate::logging::{BarLog, LogEvent, TradeEvent, TradeLog};
+use crate::logging::{BarLog, EntryBlockReason, LogEvent, TradeEvent, TradeLog};
 use crate::position::{PositionError, SizeConverter, compute_capital, risk_parity_weights};
 use crate::state::{PositionLeg, PositionSnapshot, StateMachine, StrategyState, StrategyStatus};
 use crate::storage::PriceBarRecord;
@@ -176,6 +176,7 @@ impl StrategyEngine {
         let mut notional_btc = None;
         let mut funding_cost_est = None;
         let mut funding_skip = None;
+        let mut entry_block_reason = None;
         let mut trade_logs = Vec::new();
 
         if let Some(vol_eth) = vol_snapshot.vol_eth
@@ -185,6 +186,14 @@ impl StrategyEngine {
                 .map_err(|err| StrategyError::Position(err.to_string()))?;
             w_eth = Some(weights.w_eth);
             w_btc = Some(weights.w_btc);
+        }
+
+        if self.state_machine.state().status == StrategyStatus::Flat {
+            if entry_signal.is_none() {
+                entry_block_reason = Some(EntryBlockReason::NoCross);
+            } else if vol_snapshot.vol_eth.is_none() || vol_snapshot.vol_btc.is_none() {
+                entry_block_reason = Some(EntryBlockReason::VolatilityUnavailable);
+            }
         }
 
         if let Some(signal) = entry_signal
@@ -256,6 +265,7 @@ impl StrategyEngine {
                 .map_err(|err| StrategyError::Funding(err.to_string()))?;
                 funding_skip = Some(decision.should_skip);
                 if decision.should_skip {
+                    entry_block_reason = Some(EntryBlockReason::FundingFilter);
                     return Ok(self.build_outcome(
                         bar,
                         z_snapshot,
@@ -267,12 +277,14 @@ impl StrategyEngine {
                         Some(notional_btc_value),
                         funding_cost_est,
                         funding_skip,
+                        entry_block_reason,
                         trade_logs,
                     ));
                 }
                 if self.config.funding.modes.contains(&FundingMode::Threshold)
                     && signal.zscore.abs() < decision.adjusted_entry_z
                 {
+                    entry_block_reason = Some(EntryBlockReason::FundingThreshold);
                     return Ok(self.build_outcome(
                         bar,
                         z_snapshot,
@@ -284,6 +296,7 @@ impl StrategyEngine {
                         Some(notional_btc_value),
                         funding_cost_est,
                         funding_skip,
+                        entry_block_reason,
                         trade_logs,
                     ));
                 }
@@ -309,6 +322,7 @@ impl StrategyEngine {
             {
                 Ok(order) => order,
                 Err(PositionError::BelowMinimum(_)) => {
+                    entry_block_reason = Some(EntryBlockReason::BelowMinSizeEth);
                     return Ok(self.build_outcome(
                         bar,
                         z_snapshot,
@@ -320,6 +334,7 @@ impl StrategyEngine {
                         Some(notional_btc_value),
                         funding_cost_est,
                         funding_skip,
+                        entry_block_reason,
                         trade_logs,
                     ));
                 }
@@ -329,6 +344,7 @@ impl StrategyEngine {
             {
                 Ok(order) => order,
                 Err(PositionError::BelowMinimum(_)) => {
+                    entry_block_reason = Some(EntryBlockReason::BelowMinSizeBtc);
                     return Ok(self.build_outcome(
                         bar,
                         z_snapshot,
@@ -340,6 +356,7 @@ impl StrategyEngine {
                         Some(notional_btc_value),
                         funding_cost_est,
                         funding_skip,
+                        entry_block_reason,
                         trade_logs,
                     ));
                 }
@@ -503,6 +520,7 @@ impl StrategyEngine {
             notional_btc,
             funding_cost_est,
             funding_skip,
+            entry_block_reason,
             trade_logs,
         ))
     }
@@ -519,6 +537,7 @@ impl StrategyEngine {
         notional_btc: Option<Decimal>,
         funding_cost_est: Option<Decimal>,
         funding_skip: Option<bool>,
+        entry_block_reason: Option<EntryBlockReason>,
         trade_logs: Vec<TradeLog>,
     ) -> StrategyOutcome {
         let unrealized_pnl = self
@@ -550,6 +569,7 @@ impl StrategyEngine {
                 funding_btc: bar.funding_btc,
                 funding_cost_est,
                 funding_skip,
+                entry_block_reason,
                 unrealized_pnl,
                 state: self.state_machine.state().status,
                 position: self.state_machine.state().position.clone(),

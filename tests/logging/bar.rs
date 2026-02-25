@@ -2,7 +2,7 @@ use chrono::{TimeZone, Utc};
 use rust_decimal_macros::dec;
 
 use eth_btc_strategy::core::ExitReason;
-use eth_btc_strategy::logging::{BarLog, LogEvent};
+use eth_btc_strategy::logging::{BarLog, EntryBlockReason, LogEvent};
 use eth_btc_strategy::state::StrategyStatus;
 
 #[test]
@@ -26,6 +26,7 @@ fn bar_log_contains_required_fields() {
         funding_btc: Some(dec!(0.02)),
         funding_cost_est: Some(dec!(5)),
         funding_skip: Some(false),
+        entry_block_reason: Some(EntryBlockReason::NoCross),
         unrealized_pnl: dec!(1.23),
         state: StrategyStatus::Flat,
         position: None,

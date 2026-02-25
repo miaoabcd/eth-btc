@@ -9,7 +9,7 @@ use tokio::sync::watch;
 use eth_btc_strategy::account::MockAccountSource;
 use eth_btc_strategy::config::{CapitalMode, Config, SigmaFloorMode, Symbol};
 use eth_btc_strategy::core::strategy::StrategyEngine;
-use eth_btc_strategy::data::{DataError, MockPriceSource, PriceBar, PriceFetcher, PriceSource};
+use eth_btc_strategy::data::{DataError, MockPriceSource, PriceBar, PriceFetcher};
 use eth_btc_strategy::execution::{ExecutionEngine, PaperOrderExecutor, RetryConfig};
 use eth_btc_strategy::funding::{FundingFetcher, FundingRate, MockFundingSource};
 use eth_btc_strategy::logging::{BarLogWriter, TradeLog, TradeLogWriter};
@@ -36,6 +36,25 @@ impl MockBarLogWriter {
 impl BarLogWriter for MockBarLogWriter {
     fn write(&self, bar: &eth_btc_strategy::logging::BarLog) -> Result<(), std::io::Error> {
         *self.last.lock().expect("barlog lock") = Some(bar.clone());
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct CountingBarLogWriter {
+    count: std::sync::Mutex<usize>,
+}
+
+impl CountingBarLogWriter {
+    fn count(&self) -> usize {
+        *self.count.lock().expect("count lock")
+    }
+}
+
+impl BarLogWriter for CountingBarLogWriter {
+    fn write(&self, _bar: &eth_btc_strategy::logging::BarLog) -> Result<(), std::io::Error> {
+        let mut guard = self.count.lock().expect("count lock");
+        *guard += 1;
         Ok(())
     }
 }
@@ -195,6 +214,30 @@ async fn runner_stops_on_shutdown_signal() {
     tokio::time::sleep(Duration::from_millis(15)).await;
     tx.send(true).unwrap();
 
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn runner_loop_waits_for_interval_before_first_tick() {
+    let timestamp = Utc.timestamp_opt(0, 0).unwrap();
+    let runner = runner_with_mocks(timestamp);
+    let now = Arc::new(move || timestamp);
+    let mut runner = runner.with_clock(now);
+    let writer = Arc::new(CountingBarLogWriter::default());
+    runner = runner.with_stats_writer(writer.clone());
+
+    let (tx, rx) = watch::channel(false);
+    let handle = tokio::spawn(async move {
+        runner
+            .run_loop(Duration::from_millis(50), rx)
+            .await
+            .unwrap();
+    });
+
+    tokio::time::sleep(Duration::from_millis(15)).await;
+    assert_eq!(writer.count(), 0);
+
+    tx.send(true).unwrap();
     handle.await.unwrap();
 }
 

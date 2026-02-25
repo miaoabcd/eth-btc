@@ -302,6 +302,7 @@ impl BacktestEngine {
                 funding_btc: bar.funding_btc,
                 funding_cost_est: None,
                 funding_skip: None,
+                entry_block_reason: None,
                 unrealized_pnl,
                 state: state_machine.state().status,
                 position: state_machine.state().position.clone(),
