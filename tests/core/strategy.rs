@@ -650,3 +650,32 @@ async fn strategy_engine_skips_entry_below_minimum_size() {
     let submitted = recorder.submitted.lock().expect("submit lock");
     assert!(submitted.is_empty());
 }
+
+#[tokio::test]
+async fn strategy_engine_marks_unavailable_zscore_as_not_ready() {
+    let mut config = Config::default();
+    config.strategy.n_z = 384;
+    config.position.n_vol = 1;
+    config.position.c_mode = CapitalMode::FixedNotional;
+    config.position.c_value = Some(dec!(100));
+
+    let execution =
+        ExecutionEngine::new(std::sync::Arc::new(PaperOrderExecutor), RetryConfig::fast());
+    let mut engine = StrategyEngine::new(config, execution).unwrap();
+
+    let first_bar = eth_btc_strategy::core::strategy::StrategyBar {
+        timestamp: Utc.timestamp_opt(0, 0).unwrap(),
+        eth_price: dec!(2000),
+        btc_price: dec!(30000),
+        equity: None,
+        funding_eth: None,
+        funding_btc: None,
+        funding_interval_hours: None,
+    };
+    let outcome = engine.process_bar(first_bar).await.unwrap();
+    assert_eq!(outcome.state, StrategyStatus::Flat);
+    assert_eq!(
+        outcome.bar_log.entry_block_reason,
+        Some(EntryBlockReason::ZscoreUnavailable)
+    );
+}

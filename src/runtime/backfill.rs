@@ -35,7 +35,7 @@ pub fn replay_warmup_gap_window(
     if target_run_bar <= warmed_run_bar {
         return None;
     }
-    let start = warmed_run_bar + Duration::seconds(BAR_SECS);
+    let start = warmed_run_bar;
     let end = target_run_bar - Duration::seconds(BAR_SECS);
     if start <= end {
         Some((start, end))
@@ -200,14 +200,17 @@ mod tests {
         let warm = ts(2026, 2, 17, 2, 15, 0);
         let target = ts(2026, 2, 17, 2, 45, 0);
         let gap = replay_warmup_gap_window(warm, target).expect("gap exists");
-        assert_eq!(gap.0, ts(2026, 2, 17, 2, 30, 0));
+        assert_eq!(gap.0, ts(2026, 2, 17, 2, 15, 0));
         assert_eq!(gap.1, ts(2026, 2, 17, 2, 30, 0));
     }
 
     #[test]
-    fn replay_warmup_gap_window_is_none_for_adjacent_bars() {
+    fn replay_warmup_gap_window_includes_first_missed_bar_when_adjacent() {
         let warm = ts(2026, 2, 17, 2, 15, 0);
         let target = ts(2026, 2, 17, 2, 30, 0);
-        assert_eq!(replay_warmup_gap_window(warm, target), None);
+        assert_eq!(
+            replay_warmup_gap_window(warm, target),
+            Some((ts(2026, 2, 17, 2, 15, 0), ts(2026, 2, 17, 2, 15, 0)))
+        );
     }
 }

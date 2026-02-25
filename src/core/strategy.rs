@@ -189,7 +189,9 @@ impl StrategyEngine {
         }
 
         if self.state_machine.state().status == StrategyStatus::Flat {
-            if entry_signal.is_none() {
+            if z_snapshot.zscore.is_none() {
+                entry_block_reason = Some(EntryBlockReason::ZscoreUnavailable);
+            } else if entry_signal.is_none() {
                 entry_block_reason = Some(EntryBlockReason::NoCross);
             } else if vol_snapshot.vol_eth.is_none() || vol_snapshot.vol_btc.is_none() {
                 entry_block_reason = Some(EntryBlockReason::VolatilityUnavailable);
