@@ -20,14 +20,14 @@ use eth_btc_strategy::backtest::{
 use eth_btc_strategy::cli::{Cli, Command};
 use eth_btc_strategy::config::{CapitalMode, load_config};
 use eth_btc_strategy::core::strategy::StrategyEngine;
-use eth_btc_strategy::data::{HyperliquidPriceSource, PriceFetcher, align_to_bar_close};
+use eth_btc_strategy::data::{HyperliquidPriceSource, PriceFetcher};
 use eth_btc_strategy::execution::{
     ExecutionEngine, LiveOrderExecutor, OrderExecutor, OrderRequest, PaperOrderExecutor,
     RetryConfig,
 };
 use eth_btc_strategy::funding::{FundingFetcher, HyperliquidFundingSource};
 use eth_btc_strategy::logging::{BarLogFileWriter, TradeLogFileWriter};
-use eth_btc_strategy::runtime::backfill::ensure_price_history;
+use eth_btc_strategy::runtime::backfill::{ensure_price_history, latest_completed_bar};
 use eth_btc_strategy::runtime::{LiveRunner, StateStoreWriter, StateWriter};
 use eth_btc_strategy::state::{StateStore, recover_state};
 use eth_btc_strategy::storage::{PriceStore, PriceStoreWriter};
@@ -164,6 +164,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let price_source = HyperliquidPriceSource::new(base_url.clone());
+    let warmup_now = Utc::now();
     if let Some(db_path) = config.logging.price_db_path.as_ref() {
         let warmup_bars = config.strategy.n_z.max(config.position.n_vol).max(384);
         ensure_price_history(
@@ -171,7 +172,7 @@ async fn main() -> anyhow::Result<()> {
             db_path,
             config.data.price_field,
             warmup_bars,
-            Utc::now(),
+            warmup_now,
         )
         .await
         .context("backfill price history")?;
@@ -247,7 +248,7 @@ async fn main() -> anyhow::Result<()> {
     let mut runner = LiveRunner::new(engine, price_fetcher, funding_fetcher);
     if let Some(db_path) = config.logging.price_db_path.as_ref() {
         let warmup_bars = config.strategy.n_z.max(config.position.n_vol).max(384);
-        let end = align_to_bar_close(Utc::now()).context("align warmup end")?;
+        let end = latest_completed_bar(warmup_now).context("align warmup end")?;
         let span_secs = 900 * (warmup_bars.saturating_sub(1)) as i64;
         let start = end - ChronoDuration::seconds(span_secs);
         let store = PriceStore::new(db_path).context("open price db for warmup")?;

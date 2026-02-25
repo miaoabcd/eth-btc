@@ -8,6 +8,8 @@ use crate::config::{PriceField, Symbol};
 use crate::data::{DataError, PriceSource, align_to_bar_close};
 use crate::storage::{PriceBarRecord, PriceStore, PriceStoreError};
 
+const BAR_SECS: i64 = 900;
+
 #[derive(Debug, Error)]
 pub enum BackfillError {
     #[error("data error: {0}")]
@@ -21,6 +23,11 @@ pub enum BackfillError {
     },
 }
 
+pub fn latest_completed_bar(now: DateTime<Utc>) -> Result<DateTime<Utc>, DataError> {
+    let aligned = align_to_bar_close(now)?;
+    Ok(aligned - Duration::seconds(BAR_SECS))
+}
+
 pub async fn ensure_price_history(
     source: &dyn PriceSource,
     db_path: &str,
@@ -31,8 +38,8 @@ pub async fn ensure_price_history(
     if bars_needed == 0 {
         return Ok(());
     }
-    let end = align_to_bar_close(now)?;
-    let span_secs = 900 * (bars_needed as i64 - 1);
+    let end = latest_completed_bar(now)?;
+    let span_secs = BAR_SECS * (bars_needed as i64 - 1);
     let start = end - Duration::seconds(span_secs);
 
     let store = PriceStore::new(db_path)?;
@@ -54,7 +61,7 @@ pub async fn ensure_price_history(
         .collect();
 
     for idx in 0..bars_needed {
-        let ts = start + Duration::seconds(900 * idx as i64);
+        let ts = start + Duration::seconds(BAR_SECS * idx as i64);
         let eth_bar = eth_map.get(&ts).ok_or(BackfillError::MissingBar {
             symbol: Symbol::EthPerp,
             timestamp: ts,
@@ -101,5 +108,74 @@ fn effective_price(
         PriceField::Mid => mid.or(mark).or(close),
         PriceField::Mark => mark.or(mid).or(close),
         PriceField::Close => close.or(mid).or(mark),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use chrono::TimeZone;
+    use rust_decimal_macros::dec;
+    use uuid::Uuid;
+
+    use super::*;
+    use crate::data::{MockPriceSource, PriceBar};
+
+    fn ts(y: i32, m: u32, d: u32, h: u32, min: u32, s: u32) -> chrono::DateTime<Utc> {
+        Utc.with_ymd_and_hms(y, m, d, h, min, s)
+            .single()
+            .expect("valid timestamp")
+    }
+
+    #[test]
+    fn latest_completed_bar_returns_previous_bar_for_mid_interval_time() {
+        let now = ts(2026, 2, 17, 2, 21, 33);
+        let got = latest_completed_bar(now).expect("aligned timestamp");
+        assert_eq!(got, ts(2026, 2, 17, 2, 0, 0));
+    }
+
+    #[test]
+    fn latest_completed_bar_steps_back_on_bar_boundary() {
+        let now = ts(2026, 2, 17, 2, 30, 0);
+        let got = latest_completed_bar(now).expect("aligned timestamp");
+        assert_eq!(got, ts(2026, 2, 17, 2, 15, 0));
+    }
+
+    #[tokio::test]
+    async fn ensure_price_history_uses_completed_bar_window() {
+        let now = ts(2026, 2, 17, 10, 7, 0);
+        let start = ts(2026, 2, 17, 9, 15, 0);
+        let middle = ts(2026, 2, 17, 9, 30, 0);
+        let end = ts(2026, 2, 17, 9, 45, 0);
+
+        let mut source = MockPriceSource::default();
+        source.insert_history(
+            Symbol::EthPerp,
+            vec![
+                PriceBar::new(Symbol::EthPerp, start, Some(dec!(2000)), None, None),
+                PriceBar::new(Symbol::EthPerp, middle, Some(dec!(2001)), None, None),
+                PriceBar::new(Symbol::EthPerp, end, Some(dec!(2002)), None, None),
+            ],
+        );
+        source.insert_history(
+            Symbol::BtcPerp,
+            vec![
+                PriceBar::new(Symbol::BtcPerp, start, Some(dec!(30000)), None, None),
+                PriceBar::new(Symbol::BtcPerp, middle, Some(dec!(30010)), None, None),
+                PriceBar::new(Symbol::BtcPerp, end, Some(dec!(30020)), None, None),
+            ],
+        );
+
+        let db_path = format!("/tmp/eth_btc_backfill_{}.sqlite", Uuid::new_v4());
+        let result = ensure_price_history(&source, &db_path, PriceField::Mid, 3, now).await;
+        assert!(result.is_ok(), "unexpected error: {result:?}");
+
+        let store = PriceStore::new(&db_path).expect("open price store");
+        let records = store.load_range(start, end).expect("load persisted range");
+        assert_eq!(records.len(), 3);
+        assert_eq!(records.last().expect("last record").timestamp, end);
+
+        let _ = fs::remove_file(db_path);
     }
 }
