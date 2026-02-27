@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use thiserror::Error;
 
-use crate::config::{CapitalMode, Config, FundingMode, PriceField, Symbol};
+use crate::config::{CapitalMode, Config, FundingMode, OrderType, PriceField, Symbol};
 use crate::core::TradeDirection;
 use crate::core::pipeline::SignalPipeline;
 use crate::execution::{ExecutionEngine, OrderRequest, OrderSide};
@@ -582,10 +582,16 @@ impl StrategyEngine {
     }
 
     fn limit_price(&self, side: OrderSide, price: Decimal) -> Decimal {
-        let slippage = Decimal::from(self.config.execution.slippage_bps) / Decimal::new(10000, 0);
-        match side {
-            OrderSide::Buy => price * (Decimal::ONE + slippage),
-            OrderSide::Sell => price * (Decimal::ONE - slippage),
+        match self.config.execution.order_type {
+            OrderType::Market => {
+                let slippage =
+                    Decimal::from(self.config.execution.slippage_bps) / Decimal::new(10000, 0);
+                match side {
+                    OrderSide::Buy => price * (Decimal::ONE + slippage),
+                    OrderSide::Sell => price * (Decimal::ONE - slippage),
+                }
+            }
+            OrderType::Limit => price,
         }
     }
 }

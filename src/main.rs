@@ -290,12 +290,22 @@ async fn main() -> anyhow::Result<()> {
             .vault_address
             .or_else(|| config.auth.vault_address.clone());
         let key = private_key.ok_or_else(|| anyhow!("missing Hyperliquid private key"))?;
+        let signer = PrivateKeySigner::from_str(key.trim_start_matches("0x"))
+            .map_err(|err| anyhow!("invalid private key: {err}"))?;
+        let signer_wallet = signer.address().to_string();
+        let api_wallet = vault_address
+            .clone()
+            .unwrap_or_else(|| signer_wallet.clone());
+        info!(
+            signer_wallet = %signer_wallet,
+            vault_address = ?vault_address,
+            api_wallet = %api_wallet,
+            "resolved live trading wallet"
+        );
         let account_source = if matches!(config.position.c_mode, CapitalMode::EquityRatio) {
             let user = if let Some(vault) = vault_address.clone() {
                 vault
             } else {
-                let signer = PrivateKeySigner::from_str(key.trim_start_matches("0x"))
-                    .map_err(|err| anyhow!("invalid private key: {err}"))?;
                 signer.address().to_string()
             };
             Some(Arc::new(HyperliquidAccountSource::new(

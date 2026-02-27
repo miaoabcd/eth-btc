@@ -260,6 +260,19 @@ impl HyperliquidOrderType {
             limit: HyperliquidLimitParams { tif: "Ioc" },
         }
     }
+
+    fn gtc_limit() -> Self {
+        Self {
+            limit: HyperliquidLimitParams { tif: "Gtc" },
+        }
+    }
+
+    fn from_order_type(order_type: OrderType) -> Self {
+        match order_type {
+            OrderType::Market => Self::ioc_limit(),
+            OrderType::Limit => Self::gtc_limit(),
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -640,7 +653,7 @@ impl LiveOrderExecutor {
                 price,
                 size,
                 reduce_only,
-                kind: HyperliquidOrderType::ioc_limit(),
+                kind: HyperliquidOrderType::from_order_type(order.order_type),
             }],
             grouping: HyperliquidOrderGrouping::Na,
         };
