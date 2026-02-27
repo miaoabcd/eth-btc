@@ -6,6 +6,7 @@ use std::time::Duration;
 use anyhow::{Context, anyhow};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use clap::Parser;
+use rust_decimal::{Decimal, RoundingStrategy};
 use tokio::sync::watch;
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
@@ -20,9 +21,11 @@ use eth_btc_strategy::backtest::{
 use eth_btc_strategy::cli::{Cli, Command};
 use eth_btc_strategy::config::{CapitalMode, load_config};
 use eth_btc_strategy::core::strategy::StrategyEngine;
-use eth_btc_strategy::data::{HyperliquidPriceSource, PriceFetcher, align_to_bar_close};
+use eth_btc_strategy::data::{
+    HyperliquidPriceSource, PriceFetcher, PriceSource, align_to_bar_close,
+};
 use eth_btc_strategy::execution::{
-    ExecutionEngine, LiveOrderExecutor, OrderExecutor, OrderRequest, PaperOrderExecutor,
+    ExecutionEngine, LiveOrderExecutor, OrderExecutor, OrderRequest, OrderSide, PaperOrderExecutor,
     RetryConfig,
 };
 use eth_btc_strategy::funding::{FundingFetcher, HyperliquidFundingSource};
@@ -162,6 +165,104 @@ async fn main() -> anyhow::Result<()> {
                 println!("{filled}");
                 return Ok(());
             }
+            Command::MarketTest(args) => {
+                if paper {
+                    return Err(anyhow!("market-test does not support paper mode"));
+                }
+                if args.dry_run {
+                    let payload = serde_json::json!({
+                        "symbol": args.symbol,
+                        "side": args.side,
+                        "qty": args.qty,
+                        "slippage_bps": args.slippage_bps,
+                        "price_field": config.data.price_field,
+                        "base_url": base_url,
+                        "note": "dry-run does not fetch market price or submit orders"
+                    });
+                    let pretty =
+                        serde_json::to_string_pretty(&payload).context("format dry-run")?;
+                    println!("{pretty}");
+                    return Ok(());
+                }
+                let now = Utc::now();
+                let bar_time = align_to_bar_close(now).context("align market-test timestamp")?;
+                let price_source = HyperliquidPriceSource::new(base_url.clone());
+                let bar = price_source
+                    .fetch_bar(args.symbol, bar_time)
+                    .await
+                    .context("fetch market-test price bar")?;
+                let ref_price = bar
+                    .effective_price(config.data.price_field)
+                    .ok_or_else(|| anyhow!("market-test missing effective price"))?;
+                let open_limit = ioc_limit_from_ref_price(ref_price, args.side, args.slippage_bps)
+                    .context("compute open limit price")?;
+                let close_side = match args.side {
+                    OrderSide::Buy => OrderSide::Sell,
+                    OrderSide::Sell => OrderSide::Buy,
+                };
+                let close_limit =
+                    ioc_limit_from_ref_price(ref_price, close_side, args.slippage_bps)
+                        .context("compute close limit price")?;
+                let private_key = cli
+                    .private_key
+                    .or(cli.api_key)
+                    .or_else(|| config.auth.private_key.clone());
+                let vault_address = cli
+                    .vault_address
+                    .or_else(|| config.auth.vault_address.clone());
+                let key = private_key.ok_or_else(|| anyhow!("missing Hyperliquid private key"))?;
+                let mut executor = LiveOrderExecutor::with_private_key(base_url.clone(), key);
+                if let Some(vault) = vault_address {
+                    executor = executor.with_vault_address(vault);
+                }
+                if let Some(leverage) = config.execution.leverage {
+                    executor = executor
+                        .with_leverage_config(leverage, config.execution.margin_mode.is_cross());
+                }
+
+                let open_order = OrderRequest {
+                    symbol: args.symbol,
+                    side: args.side,
+                    qty: args.qty,
+                    order_type: config.execution.order_type,
+                    limit_price: Some(open_limit),
+                };
+                let filled = executor
+                    .submit(&open_order)
+                    .await
+                    .context("submit market-test open order")?;
+                if filled <= Decimal::ZERO {
+                    return Err(anyhow!("market-test open order filled zero"));
+                }
+
+                let close_order = OrderRequest {
+                    symbol: args.symbol,
+                    side: close_side,
+                    qty: filled.abs(),
+                    order_type: config.execution.order_type,
+                    limit_price: Some(close_limit),
+                };
+                let closed = executor
+                    .close(&close_order)
+                    .await
+                    .context("submit market-test close order")?;
+                info!(
+                    open_filled = %filled,
+                    close_filled = %closed,
+                    "market-test complete"
+                );
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "open_filled": filled,
+                        "close_filled": closed,
+                        "ref_price": ref_price,
+                        "open_limit_price": open_limit,
+                        "close_limit_price": close_limit
+                    })
+                );
+                return Ok(());
+            }
         }
     }
 
@@ -294,7 +395,8 @@ async fn main() -> anyhow::Result<()> {
             )
             .await
             .context("backfill price history catchup")?;
-            if let Some((gap_start, gap_end)) = replay_warmup_gap_window(first_run_at, latest_run_at)
+            if let Some((gap_start, gap_end)) =
+                replay_warmup_gap_window(first_run_at, latest_run_at)
             {
                 let catchup = store
                     .load_range(gap_start, gap_end)
@@ -309,10 +411,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     if run_once {
-        runner
-            .run_once_at(first_run_at)
-            .await
-            .context("run once")?;
+        runner.run_once_at(first_run_at).await.context("run once")?;
         return Ok(());
     }
 
@@ -343,4 +442,49 @@ fn parse_rfc3339(value: &str) -> anyhow::Result<DateTime<Utc>> {
     let parsed = DateTime::parse_from_rfc3339(value)
         .with_context(|| format!("invalid RFC3339 timestamp: {value}"))?;
     Ok(parsed.with_timezone(&Utc))
+}
+
+fn ioc_limit_from_ref_price(
+    ref_price: Decimal,
+    side: OrderSide,
+    slippage_bps: u32,
+) -> anyhow::Result<Decimal> {
+    if ref_price <= Decimal::ZERO {
+        return Err(anyhow!("reference price must be > 0"));
+    }
+    let bps = Decimal::from(slippage_bps);
+    let scale = Decimal::from(10_000u32);
+    let multiplier = match side {
+        OrderSide::Buy => Decimal::ONE + bps / scale,
+        OrderSide::Sell => Decimal::ONE - bps / scale,
+    };
+    if multiplier <= Decimal::ZERO {
+        return Err(anyhow!("invalid slippage bps: {slippage_bps}"));
+    }
+    let raw = ref_price * multiplier;
+    let int_digits = if raw.abs() < Decimal::ONE {
+        0usize
+    } else {
+        raw.abs()
+            .trunc()
+            .to_string()
+            .chars()
+            .filter(|ch| ch.is_ascii_digit())
+            .count()
+    };
+    let decimals = if int_digits >= 5 {
+        0u32
+    } else {
+        (5usize - int_digits) as u32
+    }
+    .min(6);
+    let strategy = match side {
+        OrderSide::Buy => RoundingStrategy::ToPositiveInfinity,
+        OrderSide::Sell => RoundingStrategy::ToNegativeInfinity,
+    };
+    let rounded = raw.round_dp_with_strategy(decimals, strategy);
+    if rounded <= Decimal::ZERO {
+        return Err(anyhow!("computed limit price is not positive"));
+    }
+    Ok(rounded.normalize())
 }

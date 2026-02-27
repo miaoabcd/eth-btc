@@ -41,6 +41,7 @@ pub enum Command {
     Backtest(BacktestArgs),
     Download(DownloadArgs),
     OrderTest(OrderTestArgs),
+    MarketTest(MarketTestArgs),
 }
 
 #[derive(Debug, Args)]
@@ -79,6 +80,20 @@ pub struct OrderTestArgs {
     pub limit_price: Decimal,
     #[arg(long)]
     pub reduce_only: bool,
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct MarketTestArgs {
+    #[arg(long, value_name = "SYMBOL")]
+    pub symbol: Symbol,
+    #[arg(long, value_name = "SIDE")]
+    pub side: OrderSide,
+    #[arg(long, value_name = "QTY")]
+    pub qty: Decimal,
+    #[arg(long, default_value = "25", value_name = "BPS")]
+    pub slippage_bps: u32,
     #[arg(long)]
     pub dry_run: bool,
 }

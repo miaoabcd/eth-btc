@@ -603,7 +603,11 @@ fn select_price(
     }
 }
 
-fn compute_position_pnl(position: &PositionSnapshot, eth_price: Decimal, btc_price: Decimal) -> Decimal {
+fn compute_position_pnl(
+    position: &PositionSnapshot,
+    eth_price: Decimal,
+    btc_price: Decimal,
+) -> Decimal {
     let eth_pnl = position.eth.qty * (eth_price - position.eth.avg_price);
     let btc_pnl = position.btc.qty * (btc_price - position.btc.avg_price);
     eth_pnl + btc_pnl
