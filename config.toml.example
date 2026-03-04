@@ -94,6 +94,8 @@ state_path = "data/state.sqlite"
 [auth]
 # Hyperliquid private key (hex string, 0x...) for live trading
 private_key = "0xYOUR_PRIVATE_KEY"
+# optional account wallet address used for balance/position query (can differ from private_key-derived signer)
+wallet_address = "0xYOUR_ACCOUNT_WALLET"
 # optional vault address
 vault_address = "0xYOUR_VAULT"
 

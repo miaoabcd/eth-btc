@@ -412,6 +412,7 @@ impl Default for RuntimeConfig {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct AuthConfig {
     pub private_key: Option<String>,
+    pub wallet_address: Option<String>,
     pub vault_address: Option<String>,
 }
 
@@ -836,6 +837,9 @@ impl Config {
         if let Some(value) = overrides.auth.private_key {
             self.auth.private_key = Some(value);
         }
+        if let Some(value) = overrides.auth.wallet_address {
+            self.auth.wallet_address = Some(value);
+        }
         if let Some(value) = overrides.auth.vault_address {
             self.auth.vault_address = Some(value);
         }
@@ -1010,6 +1014,7 @@ pub struct RuntimeOverrides {
 #[derive(Debug, Default, Deserialize)]
 pub struct AuthOverrides {
     pub private_key: Option<String>,
+    pub wallet_address: Option<String>,
     pub vault_address: Option<String>,
 }
 

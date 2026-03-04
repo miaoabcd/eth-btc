@@ -23,6 +23,8 @@ pub struct Cli {
     #[arg(long, value_name = "HEX")]
     pub private_key: Option<String>,
     #[arg(long, value_name = "ADDRESS")]
+    pub wallet_address: Option<String>,
+    #[arg(long, value_name = "ADDRESS")]
     pub vault_address: Option<String>,
     #[arg(long, value_name = "SECONDS")]
     pub interval_secs: Option<u64>,
