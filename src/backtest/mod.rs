@@ -303,6 +303,7 @@ impl BacktestEngine {
                 funding_cost_est: None,
                 funding_skip: None,
                 entry_block_reason: None,
+                run_error: None,
                 unrealized_pnl,
                 state: state_machine.state().status,
                 position: state_machine.state().position.clone(),

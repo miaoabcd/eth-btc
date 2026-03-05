@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use rust_decimal::Decimal;
 use thiserror::Error;
 use tokio::sync::{Mutex, watch};
 use tokio::time::{interval, sleep};
@@ -11,7 +12,7 @@ use crate::account::AccountBalanceSource;
 use crate::core::strategy::{StrategyBar, StrategyEngine, StrategyError, StrategyOutcome};
 use crate::data::{DataError, PriceFetcher};
 use crate::funding::FundingFetcher;
-use crate::logging::{BarLogWriter, TradeLogWriter};
+use crate::logging::{BarLog, BarLogWriter, TradeLogWriter};
 use crate::state::{StateError, StateStore, StrategyState};
 use crate::storage::{PriceBarRecord, PriceBarWriter};
 pub mod backfill;
@@ -204,7 +205,51 @@ impl LiveRunner {
             funding_interval_hours: funding.as_ref().map(|value| value.interval_hours),
         };
 
-        let outcome = self.engine.process_bar(bar).await?;
+        let outcome = match self.engine.process_bar(bar).await {
+            Ok(outcome) => outcome,
+            Err(err) => {
+                if let Some(writer) = &self.stats_writer {
+                    let position = self.engine.state().state().position.clone();
+                    let unrealized_pnl = position
+                        .as_ref()
+                        .map(|pos| {
+                            pos.eth.qty * (snapshot.eth - pos.eth.avg_price)
+                                + pos.btc.qty * (snapshot.btc - pos.btc.avg_price)
+                        })
+                        .unwrap_or(Decimal::ZERO);
+                    let failed_log = BarLog {
+                        timestamp: snapshot.timestamp,
+                        eth_price: Some(snapshot.eth),
+                        btc_price: Some(snapshot.btc),
+                        r: None,
+                        mu: None,
+                        sigma: None,
+                        sigma_eff: None,
+                        zscore: None,
+                        vol_eth: None,
+                        vol_btc: None,
+                        w_eth: None,
+                        w_btc: None,
+                        notional_eth: None,
+                        notional_btc: None,
+                        funding_eth: funding.as_ref().map(|value| value.eth.rate),
+                        funding_btc: funding.as_ref().map(|value| value.btc.rate),
+                        funding_cost_est: None,
+                        funding_skip: None,
+                        entry_block_reason: None,
+                        run_error: Some(err.to_string()),
+                        unrealized_pnl,
+                        state: self.engine.state().state().status,
+                        position,
+                        events: Vec::new(),
+                    };
+                    if let Err(write_err) = writer.write(&failed_log) {
+                        warn!(error = ?write_err, "stats log write failed for errored bar");
+                    }
+                }
+                return Err(RunnerError::Strategy(err));
+            }
+        };
         if let Some(writer) = &self.state_writer {
             writer.save(self.engine.state().state()).await?;
         }

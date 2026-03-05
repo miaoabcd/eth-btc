@@ -79,6 +79,7 @@ pub struct BarLog {
     pub funding_cost_est: Option<Decimal>,
     pub funding_skip: Option<bool>,
     pub entry_block_reason: Option<EntryBlockReason>,
+    pub run_error: Option<String>,
     pub unrealized_pnl: Decimal,
     pub state: StrategyStatus,
     pub position: Option<PositionSnapshot>,
@@ -117,15 +118,17 @@ impl LogFormatter {
             .as_ref()
             .map(|reason| format!("{reason:?}"))
             .unwrap_or_else(|| "NONE".to_string());
+        let run_error = bar.run_error.as_deref().unwrap_or("NONE");
         format!(
-            "[{}] ETH={} BTC={} Z={} UPNL={} STATE={:?} BLOCK={}",
+            "[{}] ETH={} BTC={} Z={} UPNL={} STATE={:?} BLOCK={} RUN_ERROR={}",
             bar.timestamp.to_rfc3339(),
             eth,
             btc,
             z,
             bar.unrealized_pnl,
             bar.state,
-            block
+            block,
+            run_error
         )
     }
 }

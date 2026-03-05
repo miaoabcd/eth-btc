@@ -624,6 +624,47 @@ impl LiveOrderExecutor {
         qty.round_dp_with_strategy(decimals, RoundingStrategy::ToZero)
     }
 
+    fn align_price(price: Decimal, side: OrderSide) -> Result<Decimal, ExecutionError> {
+        if price <= Decimal::ZERO {
+            return Err(ExecutionError::Fatal(
+                "order price must be positive".to_string(),
+            ));
+        }
+
+        // Hyperliquid perp prices should satisfy significant-figure style constraints.
+        // Keep at most 5 significant digits (and no more than 6 decimal places),
+        // while rounding in a side-safe direction.
+        let int_digits = if price.abs() < Decimal::ONE {
+            0usize
+        } else {
+            price
+                .abs()
+                .trunc()
+                .to_string()
+                .chars()
+                .filter(|ch| ch.is_ascii_digit())
+                .count()
+        };
+        let decimals = if int_digits >= 5 {
+            0u32
+        } else {
+            (5usize - int_digits) as u32
+        }
+        .min(6);
+
+        let strategy = match side {
+            OrderSide::Buy => RoundingStrategy::ToPositiveInfinity,
+            OrderSide::Sell => RoundingStrategy::ToNegativeInfinity,
+        };
+        let rounded = price.round_dp_with_strategy(decimals, strategy).normalize();
+        if rounded <= Decimal::ZERO {
+            return Err(ExecutionError::Fatal(
+                "order price rounds to non-positive value".to_string(),
+            ));
+        }
+        Ok(rounded)
+    }
+
     async fn post_order(
         &self,
         order: &OrderRequest,
@@ -640,6 +681,7 @@ impl LiveOrderExecutor {
         let price = order.limit_price.ok_or_else(|| {
             ExecutionError::Fatal("limit_price required for Hyperliquid orders".to_string())
         })?;
+        let price = Self::align_price(price, order.side)?;
         let size = Self::align_size(order.qty, spec.sz_decimals);
         if size <= Decimal::ZERO {
             return Err(ExecutionError::Fatal(

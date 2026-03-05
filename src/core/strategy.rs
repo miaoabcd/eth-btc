@@ -11,7 +11,7 @@ use crate::logging::{BarLog, EntryBlockReason, LogEvent, TradeEvent, TradeLog};
 use crate::position::{PositionError, SizeConverter, compute_capital, risk_parity_weights};
 use crate::state::{PositionLeg, PositionSnapshot, StateMachine, StrategyState, StrategyStatus};
 use crate::storage::PriceBarRecord;
-use tracing::warn;
+use tracing::{info, warn};
 
 #[derive(Debug, Clone)]
 pub struct StrategyBar {
@@ -369,6 +369,18 @@ impl StrategyEngine {
                 TradeDirection::LongEthShortBtc => (OrderSide::Buy, OrderSide::Sell),
                 TradeDirection::ShortEthLongBtc => (OrderSide::Sell, OrderSide::Buy),
             };
+            info!(
+                timestamp = %bar.timestamp.to_rfc3339(),
+                direction = ?signal.direction,
+                zscore = %signal.zscore,
+                eth_side = ?eth_side,
+                eth_qty = %eth_order.qty,
+                eth_limit_price = %self.limit_price(eth_side, bar.eth_price),
+                btc_side = ?btc_side,
+                btc_qty = %btc_order.qty,
+                btc_limit_price = %self.limit_price(btc_side, bar.btc_price),
+                "entry order attempt"
+            );
             self.execution
                 .open_pair(
                     OrderRequest {
@@ -458,6 +470,18 @@ impl StrategyEngine {
                 order_type: self.config.execution.order_type,
                 limit_price: Some(self.limit_price(btc_side, bar.btc_price)),
             };
+            info!(
+                timestamp = %bar.timestamp.to_rfc3339(),
+                reason = ?exit_signal.reason,
+                direction = ?position.direction,
+                eth_side = ?eth_side,
+                eth_qty = %eth_order.qty,
+                eth_limit_price = %self.limit_price(eth_side, bar.eth_price),
+                btc_side = ?btc_side,
+                btc_qty = %btc_order.qty,
+                btc_limit_price = %self.limit_price(btc_side, bar.btc_price),
+                "exit order attempt"
+            );
             self.execution
                 .close_pair(eth_order, btc_order)
                 .await
@@ -572,6 +596,7 @@ impl StrategyEngine {
                 funding_cost_est,
                 funding_skip,
                 entry_block_reason,
+                run_error: None,
                 unrealized_pnl,
                 state: self.state_machine.state().status,
                 position: self.state_machine.state().position.clone(),

@@ -27,6 +27,7 @@ fn bar_log_contains_required_fields() {
         funding_cost_est: Some(dec!(5)),
         funding_skip: Some(false),
         entry_block_reason: Some(EntryBlockReason::NoCross),
+        run_error: None,
         unrealized_pnl: dec!(1.23),
         state: StrategyStatus::Flat,
         position: None,
