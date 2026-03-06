@@ -124,8 +124,10 @@ pub struct RetryConfig {
 impl RetryConfig {
     pub fn fast() -> Self {
         Self {
-            max_attempts: 2,
-            base_delay_ms: 1,
+            // Fast profile tuned for live IOC market execution:
+            // multiple quick retries with modest backoff.
+            max_attempts: 4,
+            base_delay_ms: 50,
         }
     }
 }
@@ -895,11 +897,90 @@ impl ExecutionEngine {
     }
 
     async fn retry_submit(&self, order: &OrderRequest) -> Result<Decimal, ExecutionError> {
+        if matches!(order.order_type, OrderType::Market) {
+            return self.retry_market_with_requote(order, false).await;
+        }
         self.retry_with(|| self.executor.submit(order)).await
     }
 
     async fn retry_close(&self, order: &OrderRequest) -> Result<Decimal, ExecutionError> {
+        if matches!(order.order_type, OrderType::Market) {
+            return self.retry_market_with_requote(order, true).await;
+        }
         self.retry_with(|| self.executor.close(order)).await
+    }
+
+    fn is_ioc_no_match(err: &ExecutionError) -> bool {
+        let message = err.to_string().to_lowercase();
+        message.contains("could not immediately match") || message.contains("order resting on book")
+    }
+
+    fn requoted_market_price(
+        base_price: Decimal,
+        side: OrderSide,
+        attempt: usize,
+    ) -> Result<Decimal, ExecutionError> {
+        if base_price <= Decimal::ZERO {
+            return Err(ExecutionError::Fatal(
+                "market order base price must be positive".to_string(),
+            ));
+        }
+        if attempt == 0 {
+            return Ok(base_price);
+        }
+        // Every retry widens price by +15 bps (capped at 120 bps)
+        // to improve immediate matching probability while containing slippage.
+        let widen_bps_u32 = ((attempt as u32) * 15).min(120);
+        let widen_bps = Decimal::from(widen_bps_u32);
+        let bump = widen_bps / Decimal::from(10_000u32);
+        let adjusted = match side {
+            OrderSide::Buy => base_price * (Decimal::ONE + bump),
+            OrderSide::Sell => base_price * (Decimal::ONE - bump),
+        };
+        if adjusted <= Decimal::ZERO {
+            return Err(ExecutionError::Fatal(
+                "requote produced non-positive price".to_string(),
+            ));
+        }
+        Ok(adjusted)
+    }
+
+    async fn retry_market_with_requote(
+        &self,
+        order: &OrderRequest,
+        reduce_only: bool,
+    ) -> Result<Decimal, ExecutionError> {
+        let base_price = order.limit_price.ok_or_else(|| {
+            ExecutionError::Fatal("limit_price required for market order".to_string())
+        })?;
+        let attempts = self.retry.max_attempts.max(4);
+        let mut delay = self.retry.base_delay_ms;
+
+        for attempt in 0..attempts {
+            let mut adjusted = order.clone();
+            adjusted.limit_price =
+                Some(Self::requoted_market_price(base_price, adjusted.side, attempt)?);
+            let result = if reduce_only {
+                self.executor.close(&adjusted).await
+            } else {
+                self.executor.submit(&adjusted).await
+            };
+            match result {
+                Ok(value) => return Ok(value),
+                Err(err) => {
+                    let retryable_no_match = Self::is_ioc_no_match(&err);
+                    if (err.is_transient() || retryable_no_match) && attempt + 1 < attempts {
+                        sleep(Duration::from_millis(delay)).await;
+                        delay = delay.saturating_mul(2);
+                        continue;
+                    }
+                    return Err(err);
+                }
+            }
+        }
+        Err(ExecutionError::Transient(
+            "market requote retry exhausted".to_string(),
+        ))
     }
 
     async fn retry_with<F, Fut>(&self, mut action: F) -> Result<Decimal, ExecutionError>
