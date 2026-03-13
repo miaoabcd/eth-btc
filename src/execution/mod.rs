@@ -827,7 +827,7 @@ impl ExecutionEngine {
         match self.retry_submit(&btc_order).await {
             Ok(_) => Ok(()),
             Err(err) => {
-                let _ = self
+                let rollback = self
                     .retry_close(&OrderRequest {
                         symbol: eth_order.symbol,
                         side: OrderSide::close_for_qty(eth_fill),
@@ -836,7 +836,14 @@ impl ExecutionEngine {
                         limit_price: eth_order.limit_price,
                     })
                     .await;
-                Err(ExecutionError::PartialFill(err.to_string()))
+                match rollback {
+                    Ok(_) => Err(ExecutionError::PartialFill(format!(
+                        "open second leg failed: {err}; rollback executed"
+                    ))),
+                    Err(rollback_err) => Err(ExecutionError::PartialFill(format!(
+                        "open second leg failed: {err}; rollback failed: {rollback_err}"
+                    ))),
+                }
             }
         }
     }

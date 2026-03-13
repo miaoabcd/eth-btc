@@ -4,7 +4,8 @@ use async_trait::async_trait;
 use rust_decimal_macros::dec;
 
 use eth_btc_strategy::account::{
-    AccountBalanceSource, AccountHttpClient, AccountHttpResponse, HyperliquidAccountSource,
+    AccountBalanceSource, AccountHttpClient, AccountHttpResponse, AccountPositionSource,
+    HyperliquidAccountSource,
 };
 use eth_btc_strategy::util::rate_limiter::NoopRateLimiter;
 
@@ -108,4 +109,47 @@ async fn account_source_uses_clearinghouse_state_request_type() {
         request.get("type").and_then(|value| value.as_str()),
         Some("clearinghouseState")
     );
+}
+
+#[tokio::test]
+async fn account_source_parses_pair_exposure() {
+    let body = serde_json::json!({
+        "data": {
+            "marginSummary": {
+                "totalRawUsd": "100"
+            },
+            "assetPositions": [
+                {
+                    "position": {
+                        "coin": "ETH",
+                        "szi": "-0.088",
+                        "entryPx": "2077.03",
+                        "positionValue": "182.77864"
+                    }
+                },
+                {
+                    "position": {
+                        "coin": "BTC",
+                        "szi": "0",
+                        "entryPx": null,
+                        "positionValue": "0"
+                    }
+                }
+            ]
+        }
+    })
+    .to_string();
+    let client = StaticAccountClient { status: 200, body };
+    let source = HyperliquidAccountSource::with_client_and_rate_limiter(
+        "https://api.hyperliquid.xyz",
+        "0x0000000000000000000000000000000000000000",
+        Arc::new(client),
+        Arc::new(NoopRateLimiter),
+    );
+
+    let exposure = source.fetch_pair_exposure().await.unwrap();
+
+    assert_eq!(exposure.eth_qty(), dec!(-0.088));
+    assert_eq!(exposure.btc_qty(), dec!(0));
+    assert!(exposure.has_residual());
 }

@@ -11,7 +11,7 @@ fn order(symbol: Symbol, side: OrderSide) -> OrderRequest {
         side,
         qty: dec!(1),
         order_type: OrderType::Market,
-        limit_price: None,
+        limit_price: Some(dec!(1)),
     }
 }
 
@@ -58,6 +58,32 @@ async fn open_pair_repairs_on_partial_fill() {
         .await;
 
     assert!(matches!(result, Err(ExecutionError::PartialFill(_))));
+}
+
+#[tokio::test]
+async fn open_pair_reports_rollback_failure() {
+    let mut executor = MockOrderExecutor::default();
+    executor.push_submit_response(Symbol::EthPerp, Ok(dec!(1)));
+    executor.push_submit_response(Symbol::BtcPerp, Err(ExecutionError::Fatal("fail".into())));
+    executor.push_close_response(
+        Symbol::EthPerp,
+        Err(ExecutionError::Fatal("rollback close failed".into())),
+    );
+
+    let engine = ExecutionEngine::new(std::sync::Arc::new(executor), RetryConfig::fast());
+    let result = engine
+        .open_pair(
+            order(Symbol::EthPerp, OrderSide::Sell),
+            order(Symbol::BtcPerp, OrderSide::Buy),
+        )
+        .await;
+
+    match result {
+        Err(ExecutionError::PartialFill(message)) => {
+            assert!(message.contains("rollback failed"));
+        }
+        other => panic!("unexpected result: {other:?}"),
+    }
 }
 
 #[tokio::test]

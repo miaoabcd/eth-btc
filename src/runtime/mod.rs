@@ -8,7 +8,7 @@ use tokio::sync::{Mutex, watch};
 use tokio::time::{interval, sleep};
 use tracing::{info, warn};
 
-use crate::account::AccountBalanceSource;
+use crate::account::{AccountBalanceSource, AccountPositionSource};
 use crate::core::strategy::{StrategyBar, StrategyEngine, StrategyError, StrategyOutcome};
 use crate::data::{DataError, PriceFetcher};
 use crate::funding::FundingFetcher;
@@ -57,6 +57,7 @@ pub struct LiveRunner {
     price_fetcher: PriceFetcher,
     funding_fetcher: Option<FundingFetcher>,
     account_source: Option<Arc<dyn AccountBalanceSource>>,
+    position_source: Option<Arc<dyn AccountPositionSource>>,
     state_writer: Option<Arc<dyn StateWriter>>,
     stats_writer: Option<Arc<dyn BarLogWriter>>,
     trade_writer: Option<Arc<dyn TradeLogWriter>>,
@@ -75,6 +76,7 @@ impl LiveRunner {
             price_fetcher,
             funding_fetcher,
             account_source: None,
+            position_source: None,
             state_writer: None,
             stats_writer: None,
             trade_writer: None,
@@ -98,6 +100,11 @@ impl LiveRunner {
         self
     }
 
+    pub fn with_position_source(mut self, source: Arc<dyn AccountPositionSource>) -> Self {
+        self.position_source = Some(source);
+        self
+    }
+
     pub fn with_stats_writer(mut self, writer: Arc<dyn BarLogWriter>) -> Self {
         self.stats_writer = Some(writer);
         self
@@ -115,6 +122,61 @@ impl LiveRunner {
 
     pub fn engine_mut(&mut self) -> &mut StrategyEngine {
         &mut self.engine
+    }
+
+    async fn record_strategy_failure(
+        &mut self,
+        timestamp: DateTime<Utc>,
+        eth_price: Decimal,
+        btc_price: Decimal,
+        funding_eth: Option<Decimal>,
+        funding_btc: Option<Decimal>,
+        err: &StrategyError,
+    ) {
+        if let Some(writer) = &self.state_writer
+            && let Err(save_err) = writer.save(self.engine.state().state()).await
+        {
+            warn!(error = ?save_err, "state save failed after strategy error");
+        }
+        if let Some(writer) = &self.stats_writer {
+            let position = self.engine.state().state().position.clone();
+            let unrealized_pnl = position
+                .as_ref()
+                .map(|pos| {
+                    pos.eth.qty * (eth_price - pos.eth.avg_price)
+                        + pos.btc.qty * (btc_price - pos.btc.avg_price)
+                })
+                .unwrap_or(Decimal::ZERO);
+            let failed_log = BarLog {
+                timestamp,
+                eth_price: Some(eth_price),
+                btc_price: Some(btc_price),
+                r: None,
+                mu: None,
+                sigma: None,
+                sigma_eff: None,
+                zscore: None,
+                vol_eth: None,
+                vol_btc: None,
+                w_eth: None,
+                w_btc: None,
+                notional_eth: None,
+                notional_btc: None,
+                funding_eth,
+                funding_btc,
+                funding_cost_est: None,
+                funding_skip: None,
+                entry_block_reason: None,
+                run_error: Some(err.to_string()),
+                unrealized_pnl,
+                state: self.engine.state().state().status,
+                position,
+                events: Vec::new(),
+            };
+            if let Err(write_err) = writer.write(&failed_log) {
+                warn!(error = ?write_err, "stats log write failed for errored bar");
+            }
+        }
     }
 
     pub async fn run_once(&mut self) -> Result<StrategyOutcome, RunnerError> {
@@ -205,48 +267,44 @@ impl LiveRunner {
             funding_interval_hours: funding.as_ref().map(|value| value.interval_hours),
         };
 
+        if let Some(source) = &self.position_source {
+            match source.fetch_pair_exposure().await {
+                Ok(exposure) => {
+                    if let Err(err) = self
+                        .engine
+                        .reconcile_exchange_position(&exposure, snapshot.timestamp)
+                        .await
+                    {
+                        self.record_strategy_failure(
+                            snapshot.timestamp,
+                            snapshot.eth,
+                            snapshot.btc,
+                            funding.as_ref().map(|value| value.eth.rate),
+                            funding.as_ref().map(|value| value.btc.rate),
+                            &err,
+                        )
+                        .await;
+                        return Err(RunnerError::Strategy(err));
+                    }
+                }
+                Err(err) => {
+                    warn!(error = ?err, "position fetch failed; proceeding without reconciliation");
+                }
+            }
+        }
+
         let outcome = match self.engine.process_bar(bar).await {
             Ok(outcome) => outcome,
             Err(err) => {
-                if let Some(writer) = &self.stats_writer {
-                    let position = self.engine.state().state().position.clone();
-                    let unrealized_pnl = position
-                        .as_ref()
-                        .map(|pos| {
-                            pos.eth.qty * (snapshot.eth - pos.eth.avg_price)
-                                + pos.btc.qty * (snapshot.btc - pos.btc.avg_price)
-                        })
-                        .unwrap_or(Decimal::ZERO);
-                    let failed_log = BarLog {
-                        timestamp: snapshot.timestamp,
-                        eth_price: Some(snapshot.eth),
-                        btc_price: Some(snapshot.btc),
-                        r: None,
-                        mu: None,
-                        sigma: None,
-                        sigma_eff: None,
-                        zscore: None,
-                        vol_eth: None,
-                        vol_btc: None,
-                        w_eth: None,
-                        w_btc: None,
-                        notional_eth: None,
-                        notional_btc: None,
-                        funding_eth: funding.as_ref().map(|value| value.eth.rate),
-                        funding_btc: funding.as_ref().map(|value| value.btc.rate),
-                        funding_cost_est: None,
-                        funding_skip: None,
-                        entry_block_reason: None,
-                        run_error: Some(err.to_string()),
-                        unrealized_pnl,
-                        state: self.engine.state().state().status,
-                        position,
-                        events: Vec::new(),
-                    };
-                    if let Err(write_err) = writer.write(&failed_log) {
-                        warn!(error = ?write_err, "stats log write failed for errored bar");
-                    }
-                }
+                self.record_strategy_failure(
+                    snapshot.timestamp,
+                    snapshot.eth,
+                    snapshot.btc,
+                    funding.as_ref().map(|value| value.eth.rate),
+                    funding.as_ref().map(|value| value.btc.rate),
+                    &err,
+                )
+                .await;
                 return Err(RunnerError::Strategy(err));
             }
         };

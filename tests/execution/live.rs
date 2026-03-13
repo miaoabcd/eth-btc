@@ -139,8 +139,8 @@ async fn live_executor_posts_order_payload() {
         _ => panic!("unexpected qty format"),
     }
     match &recorded.body["action"]["orders"][0]["p"] {
-        serde_json::Value::String(value) => assert_eq!(value, "2010.0"),
-        serde_json::Value::Number(value) => assert_eq!(value.to_string(), "2010.0"),
+        serde_json::Value::String(value) => assert_eq!(value, "2010"),
+        serde_json::Value::Number(value) => assert_eq!(value.to_string(), "2010"),
         _ => panic!("unexpected price format"),
     }
     let sig_r = recorded.body["signature"]["r"].as_str().expect("r");
@@ -184,6 +184,49 @@ async fn live_executor_updates_leverage_before_order() {
     assert_eq!(requests[1].body["action"]["isCross"], true);
     assert_eq!(requests[1].body["action"]["leverage"], 5);
     assert_eq!(requests[2].body["action"]["type"], "order");
+}
+
+#[tokio::test]
+async fn live_executor_updates_leverage_before_btc_order() {
+    let client = std::sync::Arc::new(MockOrderHttpClient::default());
+    client.push_response(OrderHttpResponse {
+        status: 200,
+        body: r#"{"universe":[{"name":"ETH","szDecimals":3},{"name":"BTC","szDecimals":3}]}"#
+            .to_string(),
+    });
+    client.push_response(OrderHttpResponse {
+        status: 200,
+        body: r#"{"status":"ok","response":{"type":"updateLeverage","data":{"status":"success"}}}"#
+            .to_string(),
+    });
+    client.push_response(OrderHttpResponse {
+        status: 200,
+        body: r#"{"status":"ok","response":{"type":"order","data":{"statuses":[{"filled":{"totalSz":"1.25","avgPx":"2000","oid":1}}]}}}"#
+            .to_string(),
+    });
+
+    let executor = signed_executor(client.clone()).with_leverage_config(2, false);
+    let filled = executor
+        .submit(&OrderRequest {
+            symbol: Symbol::BtcPerp,
+            side: OrderSide::Sell,
+            qty: dec!(0.01),
+            order_type: OrderType::Market,
+            limit_price: Some(dec!(70000)),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(filled, dec!(1.25));
+
+    let requests = client.requests.lock().expect("requests lock");
+    assert_eq!(requests.len(), 3);
+    assert_eq!(requests[1].body["action"]["type"], "updateLeverage");
+    assert_eq!(requests[1].body["action"]["asset"], 1);
+    assert_eq!(requests[1].body["action"]["isCross"], false);
+    assert_eq!(requests[1].body["action"]["leverage"], 2);
+    assert_eq!(requests[2].body["action"]["type"], "order");
+    assert_eq!(requests[2].body["action"]["orders"][0]["a"], 1);
 }
 
 #[tokio::test]

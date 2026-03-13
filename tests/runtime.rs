@@ -6,15 +6,16 @@ use chrono::{TimeZone, Utc};
 use rust_decimal_macros::dec;
 use tokio::sync::watch;
 
-use eth_btc_strategy::account::MockAccountSource;
+use eth_btc_strategy::account::{AccountPositionSource, MockAccountSource, PairExposure};
 use eth_btc_strategy::config::{CapitalMode, Config, SigmaFloorMode, Symbol};
+use eth_btc_strategy::core::TradeDirection;
 use eth_btc_strategy::core::strategy::StrategyEngine;
 use eth_btc_strategy::data::{DataError, MockPriceSource, PriceBar, PriceFetcher};
 use eth_btc_strategy::execution::{ExecutionEngine, PaperOrderExecutor, RetryConfig};
 use eth_btc_strategy::funding::{FundingFetcher, FundingRate, MockFundingSource};
-use eth_btc_strategy::logging::{BarLogWriter, TradeLog, TradeLogWriter};
+use eth_btc_strategy::logging::{BarLogWriter, LogEvent, TradeLog, TradeLogWriter};
 use eth_btc_strategy::runtime::{LiveRunner, RunnerError, StateWriter};
-use eth_btc_strategy::state::StrategyState;
+use eth_btc_strategy::state::{PositionLeg, PositionSnapshot, StrategyState, StrategyStatus};
 use eth_btc_strategy::storage::{PriceBarRecord, PriceBarWriter};
 
 #[derive(Default)]
@@ -82,6 +83,11 @@ struct MockPriceWriter {
     last: std::sync::Mutex<Option<PriceBarRecord>>,
 }
 
+#[derive(Default)]
+struct MockPositionSource {
+    exposure: std::sync::Mutex<PairExposure>,
+}
+
 impl MockPriceWriter {
     fn last(&self) -> Option<PriceBarRecord> {
         self.last.lock().expect("price lock").clone()
@@ -92,6 +98,13 @@ impl PriceBarWriter for MockPriceWriter {
     fn write(&self, record: &PriceBarRecord) -> Result<(), std::io::Error> {
         *self.last.lock().expect("price lock") = Some(record.clone());
         Ok(())
+    }
+}
+
+#[async_trait]
+impl AccountPositionSource for MockPositionSource {
+    async fn fetch_pair_exposure(&self) -> Result<PairExposure, eth_btc_strategy::account::AccountError> {
+        Ok(self.exposure.lock().expect("exposure lock").clone())
     }
 }
 
@@ -252,6 +265,101 @@ async fn runner_persists_state_after_bar() {
     runner.run_once_at(timestamp).await.unwrap();
 
     assert!(writer.saved_state().is_some());
+}
+
+#[tokio::test]
+async fn runner_repairs_exchange_residual_before_processing_bar() {
+    let timestamp = Utc.timestamp_opt(0, 0).unwrap();
+    let mut runner = runner_with_mocks(timestamp);
+    let position_source = Arc::new(MockPositionSource::default());
+    *position_source.exposure.lock().expect("exposure lock") = PairExposure {
+        eth: Some(eth_btc_strategy::account::ExchangePosition {
+            qty: dec!(-0.088),
+            entry_price: dec!(2077.03),
+            notional: dec!(182.77864),
+        }),
+        btc: None,
+    };
+    let writer = Arc::new(MockBarLogWriter::default());
+    runner = runner
+        .with_position_source(position_source)
+        .with_stats_writer(writer.clone());
+
+    let outcome = runner.run_once_at(timestamp).await.unwrap();
+
+    assert_eq!(outcome.state, StrategyStatus::Flat);
+    assert!(outcome.events.contains(&LogEvent::ResidualRepair));
+    let logged = writer.last().expect("expected stats log");
+    assert!(logged.events.contains(&LogEvent::ResidualRepair));
+}
+
+#[tokio::test]
+async fn runner_flattens_local_state_when_exchange_is_flat() {
+    let timestamp = Utc.timestamp_opt(0, 0).unwrap();
+    let mut runner = runner_with_mocks(timestamp);
+    runner
+        .engine_mut()
+        .apply_state(StrategyState {
+            status: StrategyStatus::InPosition,
+            position: Some(PositionSnapshot {
+                direction: TradeDirection::LongEthShortBtc,
+                entry_time: timestamp,
+                eth: PositionLeg {
+                    qty: dec!(1),
+                    avg_price: dec!(2000),
+                    notional: dec!(2000),
+                },
+                btc: PositionLeg {
+                    qty: dec!(-0.1),
+                    avg_price: dec!(30000),
+                    notional: dec!(3000),
+                },
+            }),
+            cooldown_until: None,
+        })
+        .unwrap();
+    let position_source = Arc::new(MockPositionSource::default());
+    runner = runner.with_position_source(position_source);
+
+    let outcome = runner.run_once_at(timestamp).await.unwrap();
+
+    assert_eq!(outcome.state, StrategyStatus::Flat);
+}
+
+#[tokio::test]
+async fn runner_errors_when_exchange_has_untracked_open_pair() {
+    let timestamp = Utc.timestamp_opt(0, 0).unwrap();
+    let mut runner = runner_with_mocks(timestamp);
+    let position_source = Arc::new(MockPositionSource::default());
+    *position_source.exposure.lock().expect("exposure lock") = PairExposure {
+        eth: Some(eth_btc_strategy::account::ExchangePosition {
+            qty: dec!(1),
+            entry_price: dec!(2000),
+            notional: dec!(2000),
+        }),
+        btc: Some(eth_btc_strategy::account::ExchangePosition {
+            qty: dec!(-0.1),
+            entry_price: dec!(30000),
+            notional: dec!(3000),
+        }),
+    };
+    let writer = Arc::new(MockBarLogWriter::default());
+    runner = runner
+        .with_position_source(position_source)
+        .with_stats_writer(writer.clone());
+
+    let err = runner.run_once_at(timestamp).await.unwrap_err();
+
+    assert!(matches!(err, RunnerError::Strategy(_)));
+    let logged = writer.last().expect("expected failed stats log");
+    assert_eq!(logged.state, StrategyStatus::Flat);
+    assert!(
+        logged
+            .run_error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("exchange position exists while local state is Flat")
+    );
 }
 
 #[tokio::test]

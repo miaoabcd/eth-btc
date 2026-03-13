@@ -12,7 +12,9 @@ use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 use alloy_signer_local::PrivateKeySigner;
-use eth_btc_strategy::account::HyperliquidAccountSource;
+use eth_btc_strategy::account::{
+    AccountBalanceSource, AccountPositionSource, HyperliquidAccountSource,
+};
 use eth_btc_strategy::backtest::download::{HyperliquidDownloader, write_bars_to_output};
 use eth_btc_strategy::backtest::{
     BacktestEngine, export_equity_csv, export_metrics_json, export_trades_csv, load_backtest_bars,
@@ -276,9 +278,10 @@ async fn main() -> anyhow::Result<()> {
         Some(FundingFetcher::new(Arc::new(source)))
     };
 
-    let (execution, account_source) = if paper {
+    let (execution, account_source, position_source) = if paper {
         (
             ExecutionEngine::new(Arc::new(PaperOrderExecutor), RetryConfig::fast()),
+            None,
             None,
         )
     } else {
@@ -311,11 +314,18 @@ async fn main() -> anyhow::Result<()> {
             execution_wallet = %execution_wallet,
             "resolved live trading wallet"
         );
-        let account_source = if matches!(config.position.c_mode, CapitalMode::EquityRatio) {
-            Some(Arc::new(HyperliquidAccountSource::new(base_url.clone(), account_wallet)))
-        } else {
-            None
-        };
+        let live_account_source = Arc::new(HyperliquidAccountSource::new(
+            base_url.clone(),
+            account_wallet.clone(),
+        ));
+        let account_source: Option<Arc<dyn AccountBalanceSource>> =
+            if matches!(config.position.c_mode, CapitalMode::EquityRatio) {
+                Some(live_account_source.clone())
+            } else {
+                None
+            };
+        let position_source: Option<Arc<dyn AccountPositionSource>> =
+            Some(live_account_source.clone());
         let mut executor = LiveOrderExecutor::with_private_key(base_url.clone(), key);
         if let Some(vault) = vault_address {
             executor = executor.with_vault_address(vault);
@@ -327,6 +337,7 @@ async fn main() -> anyhow::Result<()> {
         (
             ExecutionEngine::new(Arc::new(executor), RetryConfig::fast()),
             account_source,
+            position_source,
         )
     };
     let mut engine = StrategyEngine::new(config.clone(), execution).context("create engine")?;
@@ -349,6 +360,9 @@ async fn main() -> anyhow::Result<()> {
     let mut runner = LiveRunner::new(engine, price_fetcher, funding_fetcher);
     if let Some(source) = account_source {
         runner = runner.with_account_source(source);
+    }
+    if let Some(source) = position_source {
+        runner = runner.with_position_source(source);
     }
     if let Some(writer) = state_writer {
         runner = runner.with_state_writer(writer);

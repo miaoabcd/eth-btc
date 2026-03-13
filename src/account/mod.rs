@@ -28,6 +28,45 @@ pub struct AccountHttpResponse {
     pub body: String,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExchangePosition {
+    pub qty: Decimal,
+    pub entry_price: Decimal,
+    pub notional: Decimal,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PairExposure {
+    pub eth: Option<ExchangePosition>,
+    pub btc: Option<ExchangePosition>,
+}
+
+impl PairExposure {
+    pub fn eth_qty(&self) -> Decimal {
+        self.eth
+            .as_ref()
+            .map(|position| position.qty)
+            .unwrap_or(Decimal::ZERO)
+    }
+
+    pub fn btc_qty(&self) -> Decimal {
+        self.btc
+            .as_ref()
+            .map(|position| position.qty)
+            .unwrap_or(Decimal::ZERO)
+    }
+
+    pub fn is_flat(&self) -> bool {
+        self.eth_qty() == Decimal::ZERO && self.btc_qty() == Decimal::ZERO
+    }
+
+    pub fn has_residual(&self) -> bool {
+        let eth_zero = self.eth_qty() == Decimal::ZERO;
+        let btc_zero = self.btc_qty() == Decimal::ZERO;
+        (eth_zero && !btc_zero) || (!eth_zero && btc_zero)
+    }
+}
+
 #[async_trait]
 pub trait AccountHttpClient: Send + Sync {
     async fn post(&self, url: &str, body: Value) -> Result<AccountHttpResponse, AccountError>;
@@ -70,6 +109,11 @@ pub trait AccountBalanceSource: Send + Sync {
     async fn fetch_available_balance(&self) -> Result<Decimal, AccountError>;
 }
 
+#[async_trait]
+pub trait AccountPositionSource: Send + Sync {
+    async fn fetch_pair_exposure(&self) -> Result<PairExposure, AccountError>;
+}
+
 #[derive(Clone)]
 pub struct HyperliquidAccountSource {
     base_url: String,
@@ -106,6 +150,16 @@ impl HyperliquidAccountSource {
         format!("{}/info", self.base_url.trim_end_matches('/'))
     }
 
+    fn request_body(&self) -> Value {
+        serde_json::json!({"type": "clearinghouseState", "user": self.user})
+    }
+
+    fn parse_payload(body: &str) -> Result<Value, AccountError> {
+        let payload: Value = serde_json::from_str(body)
+            .map_err(|err| AccountError::InvalidResponse(err.to_string()))?;
+        Ok(payload.get("data").cloned().unwrap_or(payload))
+    }
+
     fn parse_decimal(value: &Value) -> Result<Decimal, AccountError> {
         let value = match value {
             Value::String(value) => value.clone(),
@@ -121,9 +175,7 @@ impl HyperliquidAccountSource {
     }
 
     fn parse_available_balance(&self, body: &str) -> Result<Decimal, AccountError> {
-        let payload: Value = serde_json::from_str(body)
-            .map_err(|err| AccountError::InvalidResponse(err.to_string()))?;
-        let payload = payload.get("data").unwrap_or(&payload);
+        let payload = Self::parse_payload(body)?;
         let margin_summary = payload
             .get("marginSummary")
             .ok_or_else(|| AccountError::MissingData("marginSummary missing".to_string()))?;
@@ -131,6 +183,59 @@ impl HyperliquidAccountSource {
             .get("totalRawUsd")
             .ok_or_else(|| AccountError::MissingData("totalRawUsd missing".to_string()))?;
         Self::parse_decimal(total_raw)
+    }
+
+    fn parse_position(position: &Value) -> Result<Option<(&str, ExchangePosition)>, AccountError> {
+        let position = position.get("position").unwrap_or(position);
+        let coin = position
+            .get("coin")
+            .and_then(Value::as_str)
+            .ok_or_else(|| AccountError::MissingData("position.coin missing".to_string()))?;
+        let qty = position
+            .get("szi")
+            .ok_or_else(|| AccountError::MissingData("position.szi missing".to_string()))
+            .and_then(Self::parse_decimal)?;
+        if qty == Decimal::ZERO {
+            return Ok(None);
+        }
+        let entry_price = position
+            .get("entryPx")
+            .map(Self::parse_decimal)
+            .transpose()?
+            .unwrap_or(Decimal::ZERO);
+        let notional = position
+            .get("positionValue")
+            .map(Self::parse_decimal)
+            .transpose()?
+            .unwrap_or_else(|| qty.abs() * entry_price);
+        Ok(Some((
+            coin,
+            ExchangePosition {
+                qty,
+                entry_price,
+                notional,
+            },
+        )))
+    }
+
+    fn parse_pair_exposure(&self, body: &str) -> Result<PairExposure, AccountError> {
+        let payload = Self::parse_payload(body)?;
+        let asset_positions = payload
+            .get("assetPositions")
+            .and_then(Value::as_array)
+            .ok_or_else(|| AccountError::MissingData("assetPositions missing".to_string()))?;
+        let mut exposure = PairExposure::default();
+        for asset_position in asset_positions {
+            let Some((coin, position)) = Self::parse_position(asset_position)? else {
+                continue;
+            };
+            match coin {
+                "ETH" => exposure.eth = Some(position),
+                "BTC" => exposure.btc = Some(position),
+                _ => {}
+            }
+        }
+        Ok(exposure)
     }
 }
 
@@ -140,13 +245,29 @@ impl AccountBalanceSource for HyperliquidAccountSource {
         self.rate_limiter.wait().await;
         let response = self
             .http
-            .post(
-                &self.endpoint_url(),
-                serde_json::json!({"type": "clearinghouseState", "user": self.user}),
-            )
+            .post(&self.endpoint_url(), self.request_body())
             .await?;
         match response.status {
             200 => self.parse_available_balance(&response.body),
+            429 => Err(AccountError::RateLimited),
+            status if status >= 500 => Err(AccountError::Http(format!("server error {status}"))),
+            status => Err(AccountError::InvalidResponse(format!(
+                "client error {status}"
+            ))),
+        }
+    }
+}
+
+#[async_trait]
+impl AccountPositionSource for HyperliquidAccountSource {
+    async fn fetch_pair_exposure(&self) -> Result<PairExposure, AccountError> {
+        self.rate_limiter.wait().await;
+        let response = self
+            .http
+            .post(&self.endpoint_url(), self.request_body())
+            .await?;
+        match response.status {
+            200 => self.parse_pair_exposure(&response.body),
             429 => Err(AccountError::RateLimited),
             status if status >= 500 => Err(AccountError::Http(format!("server error {status}"))),
             status => Err(AccountError::InvalidResponse(format!(

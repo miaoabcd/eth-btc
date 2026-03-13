@@ -2,6 +2,7 @@ use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use thiserror::Error;
 
+use crate::account::PairExposure;
 use crate::config::{CapitalMode, Config, FundingMode, OrderType, PriceField, Symbol};
 use crate::core::TradeDirection;
 use crate::core::pipeline::SignalPipeline;
@@ -52,6 +53,7 @@ pub struct StrategyEngine {
     state_machine: StateMachine,
     execution: ExecutionEngine,
     cumulative_realized_pnl: Decimal,
+    pending_events: Vec<LogEvent>,
 }
 
 impl std::fmt::Debug for StrategyEngine {
@@ -74,6 +76,7 @@ impl StrategyEngine {
             config,
             execution,
             cumulative_realized_pnl: Decimal::ZERO,
+            pending_events: Vec::new(),
         })
     }
 
@@ -85,6 +88,69 @@ impl StrategyEngine {
         self.state_machine
             .hydrate(state)
             .map_err(|err| StrategyError::Position(err.to_string()))
+    }
+
+    pub async fn reconcile_exchange_position(
+        &mut self,
+        exposure: &PairExposure,
+        timestamp: DateTime<Utc>,
+    ) -> Result<(), StrategyError> {
+        let local_state = self.state_machine.state().clone();
+
+        if exposure.is_flat() {
+            if local_state.position.is_some() {
+                warn!(
+                    local_status = ?local_state.status,
+                    "exchange is flat while local state still holds a position; forcing flat"
+                );
+                self.state_machine.force_flat();
+            }
+            return Ok(());
+        }
+
+        if exposure.has_residual() {
+            let position = self.exposure_to_position(exposure, timestamp)?;
+            warn!(
+                eth_qty = %position.eth.qty,
+                btc_qty = %position.btc.qty,
+                "exchange residual leg detected; attempting repair"
+            );
+            self.execution
+                .repair_residual(&position)
+                .await
+                .map_err(|err| StrategyError::Execution(err.to_string()))?;
+            self.state_machine.force_flat();
+            self.pending_events.push(LogEvent::ResidualRepair);
+            return Ok(());
+        }
+
+        match local_state.status {
+            StrategyStatus::InPosition => {
+                let Some(position) = local_state.position.as_ref() else {
+                    return Err(StrategyError::Position(
+                        "in-position state missing local snapshot".to_string(),
+                    ));
+                };
+                if !Self::exposure_matches_position(exposure, position) {
+                    return Err(StrategyError::Execution(format!(
+                        "exchange position mismatch with local state: local eth_qty={} btc_qty={}, remote eth_qty={} btc_qty={}",
+                        position.eth.qty,
+                        position.btc.qty,
+                        exposure.eth_qty(),
+                        exposure.btc_qty(),
+                    )));
+                }
+                Ok(())
+            }
+            StrategyStatus::Flat | StrategyStatus::Cooldown => Err(StrategyError::Execution(
+                format!(
+                    "exchange position exists while local state is {:?}: remote eth_qty={} btc_qty={}",
+                    local_state.status,
+                    exposure.eth_qty(),
+                    exposure.btc_qty(),
+                ),
+            )),
+        }
     }
 
     pub fn warm_up_with_records(
@@ -138,7 +204,7 @@ impl StrategyEngine {
         bar: StrategyBar,
     ) -> Result<StrategyOutcome, StrategyError> {
         self.state_machine.update(bar.timestamp);
-        let mut events = Vec::new();
+        let mut events = std::mem::take(&mut self.pending_events);
 
         if let Some(position) = self.state_machine.state().position.clone()
             && position.has_residual()
@@ -618,6 +684,59 @@ impl StrategyEngine {
             }
             OrderType::Limit => price,
         }
+    }
+
+    fn exposure_to_position(
+        &self,
+        exposure: &PairExposure,
+        timestamp: DateTime<Utc>,
+    ) -> Result<PositionSnapshot, StrategyError> {
+        let eth_qty = exposure.eth_qty();
+        let btc_qty = exposure.btc_qty();
+        let direction = if eth_qty > Decimal::ZERO || btc_qty < Decimal::ZERO {
+            TradeDirection::LongEthShortBtc
+        } else if eth_qty < Decimal::ZERO || btc_qty > Decimal::ZERO {
+            TradeDirection::ShortEthLongBtc
+        } else {
+            return Err(StrategyError::Position(
+                "cannot infer direction from flat exchange exposure".to_string(),
+            ));
+        };
+
+        Ok(PositionSnapshot {
+            direction,
+            entry_time: timestamp,
+            eth: PositionLeg {
+                qty: eth_qty,
+                avg_price: exposure
+                    .eth
+                    .as_ref()
+                    .map(|position| position.entry_price)
+                    .unwrap_or(Decimal::ZERO),
+                notional: exposure
+                    .eth
+                    .as_ref()
+                    .map(|position| position.notional)
+                    .unwrap_or(Decimal::ZERO),
+            },
+            btc: PositionLeg {
+                qty: btc_qty,
+                avg_price: exposure
+                    .btc
+                    .as_ref()
+                    .map(|position| position.entry_price)
+                    .unwrap_or(Decimal::ZERO),
+                notional: exposure
+                    .btc
+                    .as_ref()
+                    .map(|position| position.notional)
+                    .unwrap_or(Decimal::ZERO),
+            },
+        })
+    }
+
+    fn exposure_matches_position(exposure: &PairExposure, position: &PositionSnapshot) -> bool {
+        exposure.eth_qty() == position.eth.qty && exposure.btc_qty() == position.btc.qty
     }
 }
 
