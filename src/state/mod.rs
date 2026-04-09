@@ -19,6 +19,7 @@ pub enum StateError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StrategyStatus {
     Flat,
+    PendingEntry,
     InPosition,
     Cooldown,
 }
@@ -55,9 +56,21 @@ impl PositionSnapshot {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PendingEntrySnapshot {
+    pub direction: TradeDirection,
+    pub eth_qty: Decimal,
+    pub btc_qty: Decimal,
+    pub eth_order_id: u64,
+    pub btc_order_id: u64,
+    pub submitted_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StrategyState {
     pub status: StrategyStatus,
     pub position: Option<PositionSnapshot>,
+    pub pending_entry: Option<PendingEntrySnapshot>,
     pub cooldown_until: Option<DateTime<Utc>>,
 }
 
@@ -66,6 +79,7 @@ impl Default for StrategyState {
         Self {
             status: StrategyStatus::Flat,
             position: None,
+            pending_entry: None,
             cooldown_until: None,
         }
     }
@@ -92,29 +106,42 @@ impl StateMachine {
     pub fn force_flat(&mut self) {
         self.state.status = StrategyStatus::Flat;
         self.state.position = None;
+        self.state.pending_entry = None;
         self.state.cooldown_until = None;
     }
 
     pub fn hydrate(&mut self, state: StrategyState) -> Result<(), StateError> {
         match state.status {
             StrategyStatus::Flat => {
-                if state.position.is_some() {
+                if state.position.is_some() || state.pending_entry.is_some() {
                     return Err(StateError::InvalidTransition(
-                        "flat state cannot contain position".to_string(),
+                        "flat state cannot contain position or pending entry".to_string(),
+                    ));
+                }
+            }
+            StrategyStatus::PendingEntry => {
+                if state.pending_entry.is_none() || state.position.is_some() {
+                    return Err(StateError::InvalidTransition(
+                        "pending-entry state must contain pending entry and no position"
+                            .to_string(),
                     ));
                 }
             }
             StrategyStatus::InPosition => {
-                if state.position.is_none() {
+                if state.position.is_none() || state.pending_entry.is_some() {
                     return Err(StateError::InvalidTransition(
-                        "in-position state missing position".to_string(),
+                        "in-position state must contain position and no pending entry"
+                            .to_string(),
                     ));
                 }
             }
             StrategyStatus::Cooldown => {
-                if state.cooldown_until.is_none() {
+                if state.cooldown_until.is_none()
+                    || state.position.is_some()
+                    || state.pending_entry.is_some()
+                {
                     return Err(StateError::InvalidTransition(
-                        "cooldown state missing cooldown_until".to_string(),
+                        "cooldown state must only contain cooldown_until".to_string(),
                     ));
                 }
             }
@@ -142,6 +169,43 @@ impl StateMachine {
         }
         self.state.status = StrategyStatus::InPosition;
         self.state.position = Some(position);
+        self.state.pending_entry = None;
+        self.state.cooldown_until = None;
+        Ok(())
+    }
+
+    pub fn enter_pending(&mut self, pending: PendingEntrySnapshot) -> Result<(), StateError> {
+        if self.state.status != StrategyStatus::Flat {
+            return Err(StateError::InvalidTransition(
+                "cannot enter pending unless flat".to_string(),
+            ));
+        }
+        if let Some(cooldown_until) = self.state.cooldown_until
+            && pending.submitted_at < cooldown_until
+        {
+            return Err(StateError::InvalidTransition(
+                "cannot enter during cooldown".to_string(),
+            ));
+        }
+        self.state.status = StrategyStatus::PendingEntry;
+        self.state.position = None;
+        self.state.pending_entry = Some(pending);
+        self.state.cooldown_until = None;
+        Ok(())
+    }
+
+    pub fn confirm_pending_entry(
+        &mut self,
+        position: PositionSnapshot,
+    ) -> Result<(), StateError> {
+        if self.state.status != StrategyStatus::PendingEntry {
+            return Err(StateError::InvalidTransition(
+                "cannot confirm pending entry unless pending".to_string(),
+            ));
+        }
+        self.state.status = StrategyStatus::InPosition;
+        self.state.position = Some(position);
+        self.state.pending_entry = None;
         self.state.cooldown_until = None;
         Ok(())
     }
@@ -164,6 +228,7 @@ impl StateMachine {
             }
         }
         self.state.position = None;
+        self.state.pending_entry = None;
         Ok(())
     }
 
@@ -268,6 +333,7 @@ pub fn recover_state(mut state: StrategyState, now: DateTime<Utc>) -> RecoveryRe
         && now >= cooldown_until
     {
         state.status = StrategyStatus::Flat;
+        state.pending_entry = None;
         state.cooldown_until = None;
     }
 
@@ -277,6 +343,7 @@ pub fn recover_state(mut state: StrategyState, now: DateTime<Utc>) -> RecoveryRe
                 alerts.push("missing position while in-position".to_string());
                 state.status = StrategyStatus::Flat;
                 state.position = None;
+                state.pending_entry = None;
             }
             Some(position) => {
                 if position.has_residual() {

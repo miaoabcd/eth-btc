@@ -138,3 +138,26 @@ fn cli_parses_order_test_subcommand() {
         other => panic!("unexpected command {other:?}"),
     }
 }
+
+#[test]
+fn cli_parses_cancel_order_subcommand() {
+    let cli = Cli::try_parse_from([
+        "bin",
+        "cancel-order",
+        "--symbol",
+        "ETH-PERP",
+        "--oid",
+        "42",
+        "--dry-run",
+    ])
+    .unwrap();
+
+    match cli.command {
+        Some(Command::CancelOrder(args)) => {
+            assert_eq!(args.symbol, Symbol::EthPerp);
+            assert_eq!(args.oid, 42);
+            assert!(args.dry_run);
+        }
+        other => panic!("unexpected command {other:?}"),
+    }
+}

@@ -689,11 +689,11 @@ impl PriceHistorySet {
         }
     }
 
-    pub fn window<'a>(
-        &'a self,
+    pub fn window(
+        &self,
         symbol: Symbol,
         window: PriceWindow,
-    ) -> impl Iterator<Item = &'a PriceBar> {
+    ) -> impl Iterator<Item = &PriceBar> {
         let history = match symbol {
             Symbol::EthPerp => &self.eth,
             Symbol::BtcPerp => &self.btc,

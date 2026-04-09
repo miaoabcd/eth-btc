@@ -11,6 +11,7 @@ fn recovery_handles_missing_position() {
     let state = StrategyState {
         status: StrategyStatus::InPosition,
         position: None,
+        pending_entry: None,
         cooldown_until: None,
     };
 
@@ -39,6 +40,7 @@ fn recovery_flags_residual_position() {
     let state = StrategyState {
         status: StrategyStatus::InPosition,
         position: Some(position),
+        pending_entry: None,
         cooldown_until: None,
     };
 

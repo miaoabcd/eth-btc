@@ -25,6 +25,7 @@ fn state_store_round_trip() {
                 notional: dec!(200),
             },
         }),
+        pending_entry: None,
         cooldown_until: None,
     };
 

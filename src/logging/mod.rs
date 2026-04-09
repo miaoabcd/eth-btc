@@ -17,6 +17,8 @@ use crate::state::{PositionSnapshot, StrategyStatus};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LogEvent {
+    EntrySubmitted,
+    EntryCancelled,
     Entry,
     Exit(ExitReason),
     CooldownStart,
@@ -148,7 +150,7 @@ impl BarLogFileWriter {
         let logger = FileLogger::new(path, RotationConfig::default())?;
         Ok(Self {
             logger: Mutex::new(logger),
-            formatter: LogFormatter::default(),
+            formatter: LogFormatter,
             format,
         })
     }
@@ -210,7 +212,7 @@ impl TradeLogFileWriter {
         let logger = FileLogger::new(path, RotationConfig::default())?;
         Ok(Self {
             logger: Mutex::new(logger),
-            formatter: TradeLogFormatter::default(),
+            formatter: TradeLogFormatter,
             format,
         })
     }

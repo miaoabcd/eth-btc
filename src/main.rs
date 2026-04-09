@@ -7,6 +7,7 @@ use anyhow::{Context, anyhow};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use clap::Parser;
 use rust_decimal::{Decimal, RoundingStrategy};
+use serde_json::{Value, json};
 use tokio::sync::watch;
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
@@ -21,14 +22,14 @@ use eth_btc_strategy::backtest::{
     load_backtest_bars_from_db,
 };
 use eth_btc_strategy::cli::{Cli, Command};
-use eth_btc_strategy::config::{CapitalMode, load_config};
+use eth_btc_strategy::config::{CapitalMode, ExecutionConfig, OrderType, load_config};
 use eth_btc_strategy::core::strategy::StrategyEngine;
 use eth_btc_strategy::data::{
     HyperliquidPriceSource, PriceFetcher, PriceSource, align_to_bar_close,
 };
 use eth_btc_strategy::execution::{
     ExecutionEngine, LiveOrderExecutor, OrderExecutor, OrderRequest, OrderSide, PaperOrderExecutor,
-    RetryConfig,
+    RetryConfig, OrderSubmitResult,
 };
 use eth_btc_strategy::funding::{FundingFetcher, HyperliquidFundingSource};
 use eth_btc_strategy::logging::{BarLogFileWriter, TradeLogFileWriter};
@@ -118,12 +119,16 @@ async fn main() -> anyhow::Result<()> {
                 return Ok(());
             }
             Command::OrderTest(args) => {
+                let now = Utc::now();
+                let order = build_order_test_request(args, &config.execution, now);
                 if args.dry_run {
-                    let payload = serde_json::json!({
-                        "symbol": args.symbol,
-                        "side": args.side,
-                        "qty": args.qty,
-                        "limit_price": args.limit_price,
+                    let payload = json!({
+                        "symbol": order.symbol,
+                        "side": order.side,
+                        "qty": order.qty,
+                        "limit_price": order.limit_price,
+                        "order_type": order.order_type,
+                        "expires_after": order.expires_after,
                         "reduce_only": args.reduce_only,
                         "base_url": base_url,
                     });
@@ -151,20 +156,20 @@ async fn main() -> anyhow::Result<()> {
                     executor = executor
                         .with_leverage_config(leverage, config.execution.margin_mode.is_cross());
                 }
-                let order = OrderRequest {
-                    symbol: args.symbol,
-                    side: args.side,
-                    qty: args.qty,
-                    order_type: config.execution.order_type,
-                    limit_price: Some(args.limit_price),
-                };
-                let filled = if args.reduce_only {
-                    executor.close(&order).await.context("close test order")?
+                let result = if args.reduce_only {
+                    executor
+                        .close_result(&order)
+                        .await
+                        .context("close test order")?
                 } else {
-                    executor.submit(&order).await.context("submit test order")?
+                    executor
+                        .submit_result(&order)
+                        .await
+                        .context("submit test order")?
                 };
-                info!(filled = %filled, "order-test complete");
-                println!("{filled}");
+                let payload = order_test_output(result);
+                info!(result = %payload, "order-test complete");
+                println!("{payload}");
                 return Ok(());
             }
             Command::MarketTest(args) => {
@@ -228,6 +233,7 @@ async fn main() -> anyhow::Result<()> {
                     qty: args.qty,
                     order_type: config.execution.order_type,
                     limit_price: Some(open_limit),
+                    expires_after: None,
                 };
                 let filled = executor
                     .submit(&open_order)
@@ -243,6 +249,7 @@ async fn main() -> anyhow::Result<()> {
                     qty: filled.abs(),
                     order_type: config.execution.order_type,
                     limit_price: Some(close_limit),
+                    expires_after: None,
                 };
                 let closed = executor
                     .close(&close_order)
@@ -263,6 +270,42 @@ async fn main() -> anyhow::Result<()> {
                         "close_limit_price": close_limit
                     })
                 );
+                return Ok(());
+            }
+            Command::CancelOrder(args) => {
+                if args.dry_run {
+                    let payload = json!({
+                        "symbol": args.symbol,
+                        "oid": args.oid,
+                        "base_url": base_url,
+                    });
+                    let pretty =
+                        serde_json::to_string_pretty(&payload).context("format dry-run")?;
+                    println!("{pretty}");
+                    return Ok(());
+                }
+                if paper {
+                    return Err(anyhow!("cancel-order does not support paper mode"));
+                }
+                let private_key = cli
+                    .private_key
+                    .or(cli.api_key)
+                    .or_else(|| config.auth.private_key.clone());
+                let vault_address = cli
+                    .vault_address
+                    .or_else(|| config.auth.vault_address.clone());
+                let key = private_key.ok_or_else(|| anyhow!("missing Hyperliquid private key"))?;
+                let mut executor = LiveOrderExecutor::with_private_key(base_url.clone(), key);
+                if let Some(vault) = vault_address {
+                    executor = executor.with_vault_address(vault);
+                }
+                executor
+                    .cancel(args.symbol, args.oid)
+                    .await
+                    .context("cancel order")?;
+                let payload = cancel_order_output(args.symbol, args.oid);
+                info!(result = %payload, "cancel-order complete");
+                println!("{payload}");
                 return Ok(());
             }
         }
@@ -512,4 +555,93 @@ fn ioc_limit_from_ref_price(
         return Err(anyhow!("computed limit price is not positive"));
     }
     Ok(rounded.normalize())
+}
+
+fn build_order_test_request(
+    args: &eth_btc_strategy::cli::OrderTestArgs,
+    execution: &ExecutionConfig,
+    now: DateTime<Utc>,
+) -> OrderRequest {
+    let expires_after = matches!(execution.order_type, OrderType::PostOnly)
+        .then(|| (now.timestamp_millis() as u64) + execution.post_only_ttl_secs * 1000);
+    OrderRequest {
+        symbol: args.symbol,
+        side: args.side,
+        qty: args.qty,
+        order_type: execution.order_type,
+        limit_price: Some(args.limit_price),
+        expires_after,
+    }
+}
+
+fn order_test_output(result: OrderSubmitResult) -> Value {
+    match result {
+        OrderSubmitResult::Filled(qty) => json!({
+            "status": "filled",
+            "qty": qty,
+        }),
+        OrderSubmitResult::Resting { oid } => json!({
+            "status": "resting",
+            "oid": oid,
+        }),
+    }
+}
+
+fn cancel_order_output(symbol: eth_btc_strategy::config::Symbol, oid: u64) -> Value {
+    json!({
+        "status": "cancelled",
+        "symbol": symbol,
+        "oid": oid,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use eth_btc_strategy::cli::OrderTestArgs;
+    use eth_btc_strategy::config::{ExecutionConfig, OrderType, Symbol};
+    use eth_btc_strategy::execution::OrderSubmitResult;
+    use rust_decimal_macros::dec;
+
+    #[test]
+    fn build_order_test_request_sets_expiry_for_post_only() {
+        let args = OrderTestArgs {
+            symbol: Symbol::EthPerp,
+            side: OrderSide::Buy,
+            qty: dec!(0.01),
+            limit_price: dec!(2000),
+            reduce_only: false,
+            dry_run: false,
+        };
+        let execution = ExecutionConfig {
+            order_type: OrderType::PostOnly,
+            post_only_ttl_secs: 30,
+            ..ExecutionConfig::default()
+        };
+        let now = DateTime::parse_from_rfc3339("2026-04-09T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let order = build_order_test_request(&args, &execution, now);
+
+        assert_eq!(order.order_type, OrderType::PostOnly);
+        assert_eq!(order.expires_after, Some(1_775_736_030_000));
+    }
+
+    #[test]
+    fn order_test_output_reports_resting_oid() {
+        let output = order_test_output(OrderSubmitResult::Resting { oid: 42 });
+
+        assert_eq!(output["status"], "resting");
+        assert_eq!(output["oid"], 42);
+    }
+
+    #[test]
+    fn cancel_order_output_reports_cancelled_oid() {
+        let output = cancel_order_output(Symbol::EthPerp, 42);
+
+        assert_eq!(output["status"], "cancelled");
+        assert_eq!(output["symbol"], "ETH_PERP");
+        assert_eq!(output["oid"], 42);
+    }
 }

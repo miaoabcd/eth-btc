@@ -4,7 +4,8 @@ use rust_decimal_macros::dec;
 use eth_btc_strategy::config::RiskConfig;
 use eth_btc_strategy::core::{ExitReason, TradeDirection};
 use eth_btc_strategy::state::{
-    PositionLeg, PositionSnapshot, StateError, StateMachine, StrategyState, StrategyStatus,
+    PendingEntrySnapshot, PositionLeg, PositionSnapshot, StateError, StateMachine, StrategyState,
+    StrategyStatus,
 };
 
 fn sample_position(timestamp: i64) -> PositionSnapshot {
@@ -83,6 +84,7 @@ fn state_machine_hydrate_restores_state() {
     let state = StrategyState {
         status: StrategyStatus::InPosition,
         position: Some(position.clone()),
+        pending_entry: None,
         cooldown_until: None,
     };
 
@@ -90,4 +92,27 @@ fn state_machine_hydrate_restores_state() {
 
     assert_eq!(machine.state().status, StrategyStatus::InPosition);
     assert_eq!(machine.state().position, Some(position));
+}
+
+#[test]
+fn state_machine_pending_entry_stays_pending_until_explicit_cancel() {
+    let config = RiskConfig::default();
+    let mut machine = StateMachine::new(config);
+
+    machine
+        .enter_pending(PendingEntrySnapshot {
+            direction: TradeDirection::LongEthShortBtc,
+            eth_qty: dec!(1),
+            btc_qty: dec!(-1),
+            eth_order_id: 11,
+            btc_order_id: 22,
+            submitted_at: Utc.timestamp_opt(100, 0).unwrap(),
+            expires_at: Utc.timestamp_opt(200, 0).unwrap(),
+        })
+        .unwrap();
+
+    assert_eq!(machine.state().status, StrategyStatus::PendingEntry);
+    machine.update(Utc.timestamp_opt(200, 0).unwrap());
+    assert_eq!(machine.state().status, StrategyStatus::PendingEntry);
+    assert!(machine.state().pending_entry.is_some());
 }

@@ -10,6 +10,7 @@ fn order(symbol: Symbol, side: OrderSide, qty: rust_decimal::Decimal) -> OrderRe
         qty,
         order_type: OrderType::Market,
         limit_price: None,
+        expires_after: None,
     }
 }
 

@@ -311,10 +311,10 @@ impl LiveRunner {
         if let Some(writer) = &self.state_writer {
             writer.save(self.engine.state().state()).await?;
         }
-        if let Some(writer) = &self.stats_writer {
-            if let Err(err) = writer.write(&outcome.bar_log) {
-                warn!(error = ?err, "stats log write failed");
-            }
+        if let Some(writer) = &self.stats_writer
+            && let Err(err) = writer.write(&outcome.bar_log)
+        {
+            warn!(error = ?err, "stats log write failed");
         }
         if let Some(writer) = &self.trade_writer {
             for log in &outcome.trade_logs {

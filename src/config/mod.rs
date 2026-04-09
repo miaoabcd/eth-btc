@@ -155,6 +155,7 @@ pub enum OrderType {
     #[default]
     Market,
     Limit,
+    PostOnly,
 }
 
 impl FromStr for OrderType {
@@ -164,6 +165,7 @@ impl FromStr for OrderType {
         match value.trim().to_uppercase().as_str() {
             "MARKET" => Ok(OrderType::Market),
             "LIMIT" => Ok(OrderType::Limit),
+            "POST_ONLY" | "POSTONLY" => Ok(OrderType::PostOnly),
             _ => Err(ConfigError::InvalidValue {
                 field: "execution.order_type",
                 message: format!("unsupported order type: {value}"),
@@ -371,6 +373,8 @@ impl Default for DataConfig {
 pub struct ExecutionConfig {
     pub order_type: OrderType,
     pub slippage_bps: u32,
+    pub post_only_bps: u32,
+    pub post_only_ttl_secs: u64,
     pub leverage: Option<u32>,
     pub margin_mode: MarginMode,
 }
@@ -380,6 +384,8 @@ impl Default for ExecutionConfig {
         Self {
             order_type: OrderType::Market,
             slippage_bps: 5,
+            post_only_bps: 2,
+            post_only_ttl_secs: 840,
             leverage: None,
             margin_mode: MarginMode::Cross,
         }
@@ -688,7 +694,7 @@ impl Config {
             });
         }
         for symbol in Symbol::all() {
-            if !self.instrument_constraints.contains_key(&symbol) {
+            if !self.instrument_constraints.contains_key(symbol) {
                 return Err(ConfigError::MissingValue {
                     field: "instrument_constraints",
                 });
@@ -809,6 +815,12 @@ impl Config {
         }
         if let Some(value) = overrides.execution.slippage_bps {
             self.execution.slippage_bps = value;
+        }
+        if let Some(value) = overrides.execution.post_only_bps {
+            self.execution.post_only_bps = value;
+        }
+        if let Some(value) = overrides.execution.post_only_ttl_secs {
+            self.execution.post_only_ttl_secs = value;
         }
         if let Some(value) = overrides.execution.leverage {
             self.execution.leverage = Some(value);
@@ -997,6 +1009,8 @@ pub struct DataOverrides {
 pub struct ExecutionOverrides {
     pub order_type: Option<OrderType>,
     pub slippage_bps: Option<u32>,
+    pub post_only_bps: Option<u32>,
+    pub post_only_ttl_secs: Option<u64>,
     pub leverage: Option<u32>,
     pub margin_mode: Option<MarginMode>,
 }

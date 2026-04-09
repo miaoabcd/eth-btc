@@ -68,10 +68,20 @@ confirm_bars_tp = 0
 price_field = "MID"
 
 [execution]
-# order type: MARKET | LIMIT
+# order type: MARKET | LIMIT | POST_ONLY
+# - MARKET: submits IOC-style marketable limit orders
+# - LIMIT: submits normal resting GTC limit orders
+# - POST_ONLY: entry orders rest passively on the book (ALO); exits still use MARKET for safety
 order_type = "MARKET"
-# slippage in bps used for LIMIT pricing
+# slippage in bps used for MARKET pricing
 slippage_bps = 5
+# passive price offset in bps when order_type=POST_ONLY
+# Example: 2 = quote 0.02% inside the safe maker side of the book
+post_only_bps = 2
+# local pending-entry timeout in seconds for post-only entries
+# When this deadline is reached, the bot cancels the resting exchange orders on the next strategy cycle
+# Keep this below the 15m bar interval so stale entries are cancelled before the next decision cycle
+post_only_ttl_secs = 840
 # leverage (optional; if set will call updateLeverage before opening)
 leverage = 3
 # margin mode: CROSS | ISOLATED

@@ -110,7 +110,7 @@ impl PriceStore {
             Some(row) => row,
             None => return Ok(None),
         };
-        Ok(Some(Self::row_to_record(&row)?))
+        Ok(Some(Self::row_to_record(row)?))
     }
 
     pub fn load_range(
@@ -132,7 +132,7 @@ impl PriceStore {
             .next()
             .map_err(|err| PriceStoreError::Persistence(err.to_string()))?
         {
-            records.push(Self::row_to_record(&row)?);
+            records.push(Self::row_to_record(row)?);
         }
         Ok(records)
     }
@@ -217,6 +217,6 @@ impl PriceBarWriter for PriceStoreWriter {
         let store = self.store.lock().expect("price store lock");
         store
             .save(record)
-            .map_err(|err| io::Error::new(io::ErrorKind::Other, err.to_string()))
+            .map_err(|err| io::Error::other(err.to_string()))
     }
 }

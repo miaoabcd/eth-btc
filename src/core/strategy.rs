@@ -6,11 +6,14 @@ use crate::account::PairExposure;
 use crate::config::{CapitalMode, Config, FundingMode, OrderType, PriceField, Symbol};
 use crate::core::TradeDirection;
 use crate::core::pipeline::SignalPipeline;
-use crate::execution::{ExecutionEngine, OrderRequest, OrderSide};
+use crate::execution::{ExecutionEngine, OrderRequest, OrderSide, PairOpenOutcome};
 use crate::funding::{FundingRate, apply_funding_controls, estimate_funding_cost};
 use crate::logging::{BarLog, EntryBlockReason, LogEvent, TradeEvent, TradeLog};
 use crate::position::{PositionError, SizeConverter, compute_capital, risk_parity_weights};
-use crate::state::{PositionLeg, PositionSnapshot, StateMachine, StrategyState, StrategyStatus};
+use crate::state::{
+    PendingEntrySnapshot, PositionLeg, PositionSnapshot, StateMachine, StrategyState,
+    StrategyStatus,
+};
 use crate::storage::PriceBarRecord;
 use tracing::{info, warn};
 
@@ -54,6 +57,7 @@ pub struct StrategyEngine {
     execution: ExecutionEngine,
     cumulative_realized_pnl: Decimal,
     pending_events: Vec<LogEvent>,
+    pending_trade_logs: Vec<TradeLog>,
 }
 
 impl std::fmt::Debug for StrategyEngine {
@@ -77,6 +81,7 @@ impl StrategyEngine {
             execution,
             cumulative_realized_pnl: Decimal::ZERO,
             pending_events: Vec::new(),
+            pending_trade_logs: Vec::new(),
         })
     }
 
@@ -125,6 +130,28 @@ impl StrategyEngine {
         }
 
         match local_state.status {
+            StrategyStatus::PendingEntry => {
+                let position = self.exposure_to_position(exposure, timestamp)?;
+                self.state_machine
+                    .confirm_pending_entry(position.clone())
+                    .map_err(|err| StrategyError::Position(err.to_string()))?;
+                self.pending_events.push(LogEvent::Entry);
+                self.pending_trade_logs.push(TradeLog {
+                    timestamp,
+                    event: TradeEvent::Entry,
+                    direction: position.direction,
+                    eth_qty: position.eth.qty,
+                    btc_qty: position.btc.qty,
+                    eth_price: position.eth.avg_price,
+                    btc_price: position.btc.avg_price,
+                    entry_time: timestamp,
+                    entry_eth_price: position.eth.avg_price,
+                    entry_btc_price: position.btc.avg_price,
+                    realized_pnl: Decimal::ZERO,
+                    cumulative_realized_pnl: self.cumulative_realized_pnl,
+                });
+                Ok(())
+            }
             StrategyStatus::InPosition => {
                 let Some(position) = local_state.position.as_ref() else {
                     return Err(StrategyError::Position(
@@ -203,8 +230,24 @@ impl StrategyEngine {
         &mut self,
         bar: StrategyBar,
     ) -> Result<StrategyOutcome, StrategyError> {
-        self.state_machine.update(bar.timestamp);
         let mut events = std::mem::take(&mut self.pending_events);
+        let mut trade_logs = std::mem::take(&mut self.pending_trade_logs);
+        if let Some(pending) = self.state_machine.state().pending_entry.clone()
+            && self.state_machine.state().status == StrategyStatus::PendingEntry
+            && bar.timestamp >= pending.expires_at
+        {
+            self.execution
+                .cancel_order(Symbol::EthPerp, pending.eth_order_id)
+                .await
+                .map_err(|err| StrategyError::Execution(err.to_string()))?;
+            self.execution
+                .cancel_order(Symbol::BtcPerp, pending.btc_order_id)
+                .await
+                .map_err(|err| StrategyError::Execution(err.to_string()))?;
+            self.state_machine.force_flat();
+            events.push(LogEvent::EntryCancelled);
+        }
+        self.state_machine.update(bar.timestamp);
 
         if let Some(position) = self.state_machine.state().position.clone()
             && position.has_residual()
@@ -243,7 +286,6 @@ impl StrategyEngine {
         let mut funding_cost_est = None;
         let mut funding_skip = None;
         let mut entry_block_reason = None;
-        let mut trade_logs = Vec::new();
 
         if let Some(vol_eth) = vol_snapshot.vol_eth
             && let Some(vol_btc) = vol_snapshot.vol_btc
@@ -435,86 +477,123 @@ impl StrategyEngine {
                 TradeDirection::LongEthShortBtc => (OrderSide::Buy, OrderSide::Sell),
                 TradeDirection::ShortEthLongBtc => (OrderSide::Sell, OrderSide::Buy),
             };
+            let entry_order_type = self.entry_order_type();
+            let eth_limit_price = self.limit_price(entry_order_type, eth_side, bar.eth_price);
+            let btc_limit_price = self.limit_price(entry_order_type, btc_side, bar.btc_price);
+            let expires_after = matches!(entry_order_type, OrderType::PostOnly).then(|| {
+                (bar.timestamp.timestamp_millis() as u64)
+                    + self.config.execution.post_only_ttl_secs * 1000
+            });
             info!(
                 timestamp = %bar.timestamp.to_rfc3339(),
                 direction = ?signal.direction,
                 zscore = %signal.zscore,
                 eth_side = ?eth_side,
                 eth_qty = %eth_order.qty,
-                eth_limit_price = %self.limit_price(eth_side, bar.eth_price),
+                eth_limit_price = %eth_limit_price,
                 btc_side = ?btc_side,
                 btc_qty = %btc_order.qty,
-                btc_limit_price = %self.limit_price(btc_side, bar.btc_price),
+                btc_limit_price = %btc_limit_price,
                 "entry order attempt"
             );
-            self.execution
+            let open_outcome = self.execution
                 .open_pair(
                     OrderRequest {
                         symbol: Symbol::EthPerp,
                         side: eth_side,
                         qty: eth_order.qty,
-                        order_type: self.config.execution.order_type,
-                        limit_price: Some(self.limit_price(eth_side, bar.eth_price)),
+                        order_type: entry_order_type,
+                        limit_price: Some(eth_limit_price),
+                        expires_after,
                     },
                     OrderRequest {
                         symbol: Symbol::BtcPerp,
                         side: btc_side,
                         qty: btc_order.qty,
-                        order_type: self.config.execution.order_type,
-                        limit_price: Some(self.limit_price(btc_side, bar.btc_price)),
+                        order_type: entry_order_type,
+                        limit_price: Some(btc_limit_price),
+                        expires_after,
                     },
                 )
                 .await
                 .map_err(|err| StrategyError::Execution(err.to_string()))?;
-
-            let position = PositionSnapshot {
-                direction: signal.direction,
-                entry_time: bar.timestamp,
-                eth: PositionLeg {
-                    qty: if signal.direction == TradeDirection::LongEthShortBtc {
-                        eth_order.qty
-                    } else {
-                        -eth_order.qty
-                    },
-                    avg_price: bar.eth_price,
-                    notional: notional_eth_value,
-                },
-                btc: PositionLeg {
-                    qty: if signal.direction == TradeDirection::LongEthShortBtc {
-                        -btc_order.qty
-                    } else {
-                        btc_order.qty
-                    },
-                    avg_price: bar.btc_price,
-                    notional: notional_btc_value,
-                },
-            };
-            self.state_machine
-                .enter(position, bar.timestamp)
-                .map_err(|err| StrategyError::Position(err.to_string()))?;
-            events.push(LogEvent::Entry);
-            trade_logs.push(TradeLog {
-                timestamp: bar.timestamp,
-                event: TradeEvent::Entry,
-                direction: signal.direction,
-                eth_qty: if signal.direction == TradeDirection::LongEthShortBtc {
-                    eth_order.qty
-                } else {
-                    -eth_order.qty
-                },
-                btc_qty: if signal.direction == TradeDirection::LongEthShortBtc {
-                    -btc_order.qty
-                } else {
-                    btc_order.qty
-                },
-                eth_price: bar.eth_price,
-                btc_price: bar.btc_price,
-                entry_time: bar.timestamp,
-                entry_eth_price: bar.eth_price,
-                entry_btc_price: bar.btc_price,
-                realized_pnl: Decimal::ZERO,
-                cumulative_realized_pnl: self.cumulative_realized_pnl,
-            });
+            match open_outcome {
+                PairOpenOutcome::Filled => {
+                    let position = PositionSnapshot {
+                        direction: signal.direction,
+                        entry_time: bar.timestamp,
+                        eth: PositionLeg {
+                            qty: if signal.direction == TradeDirection::LongEthShortBtc {
+                                eth_order.qty
+                            } else {
+                                -eth_order.qty
+                            },
+                            avg_price: bar.eth_price,
+                            notional: notional_eth_value,
+                        },
+                        btc: PositionLeg {
+                            qty: if signal.direction == TradeDirection::LongEthShortBtc {
+                                -btc_order.qty
+                            } else {
+                                btc_order.qty
+                            },
+                            avg_price: bar.btc_price,
+                            notional: notional_btc_value,
+                        },
+                    };
+                    self.state_machine
+                        .enter(position, bar.timestamp)
+                        .map_err(|err| StrategyError::Position(err.to_string()))?;
+                    events.push(LogEvent::Entry);
+                    trade_logs.push(TradeLog {
+                        timestamp: bar.timestamp,
+                        event: TradeEvent::Entry,
+                        direction: signal.direction,
+                        eth_qty: if signal.direction == TradeDirection::LongEthShortBtc {
+                            eth_order.qty
+                        } else {
+                            -eth_order.qty
+                        },
+                        btc_qty: if signal.direction == TradeDirection::LongEthShortBtc {
+                            -btc_order.qty
+                        } else {
+                            btc_order.qty
+                        },
+                        eth_price: bar.eth_price,
+                        btc_price: bar.btc_price,
+                        entry_time: bar.timestamp,
+                        entry_eth_price: bar.eth_price,
+                        entry_btc_price: bar.btc_price,
+                        realized_pnl: Decimal::ZERO,
+                        cumulative_realized_pnl: self.cumulative_realized_pnl,
+                    });
+                }
+                PairOpenOutcome::Resting(resting) => {
+                    self.state_machine
+                        .enter_pending(PendingEntrySnapshot {
+                            direction: signal.direction,
+                            eth_qty: if signal.direction == TradeDirection::LongEthShortBtc {
+                                eth_order.qty
+                            } else {
+                                -eth_order.qty
+                            },
+                            btc_qty: if signal.direction == TradeDirection::LongEthShortBtc {
+                                -btc_order.qty
+                            } else {
+                                btc_order.qty
+                            },
+                            eth_order_id: resting.eth_oid,
+                            btc_order_id: resting.btc_oid,
+                            submitted_at: bar.timestamp,
+                            expires_at: bar.timestamp
+                                + chrono::Duration::seconds(
+                                    self.config.execution.post_only_ttl_secs as i64,
+                                ),
+                        })
+                        .map_err(|err| StrategyError::Position(err.to_string()))?;
+                    events.push(LogEvent::EntrySubmitted);
+                }
+            }
         }
 
         if let Some(exit_signal) = exit_signal
@@ -522,19 +601,22 @@ impl StrategyEngine {
         {
             let eth_side = OrderSide::close_for_qty(position.eth.qty);
             let btc_side = OrderSide::close_for_qty(position.btc.qty);
+            let exit_order_type = self.exit_order_type();
             let eth_order = OrderRequest {
                 symbol: Symbol::EthPerp,
                 side: eth_side,
                 qty: position.eth.qty.abs(),
-                order_type: self.config.execution.order_type,
-                limit_price: Some(self.limit_price(eth_side, bar.eth_price)),
+                order_type: exit_order_type,
+                limit_price: Some(self.limit_price(exit_order_type, eth_side, bar.eth_price)),
+                expires_after: None,
             };
             let btc_order = OrderRequest {
                 symbol: Symbol::BtcPerp,
                 side: btc_side,
                 qty: position.btc.qty.abs(),
-                order_type: self.config.execution.order_type,
-                limit_price: Some(self.limit_price(btc_side, bar.btc_price)),
+                order_type: exit_order_type,
+                limit_price: Some(self.limit_price(exit_order_type, btc_side, bar.btc_price)),
+                expires_after: None,
             };
             info!(
                 timestamp = %bar.timestamp.to_rfc3339(),
@@ -542,10 +624,10 @@ impl StrategyEngine {
                 direction = ?position.direction,
                 eth_side = ?eth_side,
                 eth_qty = %eth_order.qty,
-                eth_limit_price = %self.limit_price(eth_side, bar.eth_price),
+                eth_limit_price = %eth_order.limit_price.unwrap_or(bar.eth_price),
                 btc_side = ?btc_side,
                 btc_qty = %btc_order.qty,
-                btc_limit_price = %self.limit_price(btc_side, bar.btc_price),
+                btc_limit_price = %btc_order.limit_price.unwrap_or(bar.btc_price),
                 "exit order attempt"
             );
             self.execution
@@ -617,6 +699,7 @@ impl StrategyEngine {
         ))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn build_outcome(
         &self,
         bar: StrategyBar,
@@ -672,8 +755,19 @@ impl StrategyEngine {
         }
     }
 
-    fn limit_price(&self, side: OrderSide, price: Decimal) -> Decimal {
+    fn entry_order_type(&self) -> OrderType {
+        self.config.execution.order_type
+    }
+
+    fn exit_order_type(&self) -> OrderType {
         match self.config.execution.order_type {
+            OrderType::PostOnly => OrderType::Market,
+            other => other,
+        }
+    }
+
+    fn limit_price(&self, order_type: OrderType, side: OrderSide, price: Decimal) -> Decimal {
+        match order_type {
             OrderType::Market => {
                 let slippage =
                     Decimal::from(self.config.execution.slippage_bps) / Decimal::new(10000, 0);
@@ -683,6 +777,14 @@ impl StrategyEngine {
                 }
             }
             OrderType::Limit => price,
+            OrderType::PostOnly => {
+                let offset =
+                    Decimal::from(self.config.execution.post_only_bps) / Decimal::new(10000, 0);
+                match side {
+                    OrderSide::Buy => price * (Decimal::ONE - offset),
+                    OrderSide::Sell => price * (Decimal::ONE + offset),
+                }
+            }
         }
     }
 

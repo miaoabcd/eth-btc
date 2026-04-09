@@ -85,6 +85,12 @@ impl ReqwestAccountClient {
     }
 }
 
+impl Default for ReqwestAccountClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait]
 impl AccountHttpClient for ReqwestAccountClient {
     async fn post(&self, url: &str, body: Value) -> Result<AccountHttpResponse, AccountError> {

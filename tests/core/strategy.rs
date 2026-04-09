@@ -1,15 +1,19 @@
 use chrono::{TimeZone, Utc};
 use rust_decimal_macros::dec;
 
-use eth_btc_strategy::config::{CapitalMode, Config, FundingMode, Symbol};
+use eth_btc_strategy::account::{ExchangePosition, PairExposure};
+use eth_btc_strategy::config::{CapitalMode, Config, FundingMode, OrderType, Symbol};
 use eth_btc_strategy::core::TradeDirection;
 use eth_btc_strategy::core::strategy::StrategyEngine;
 use eth_btc_strategy::execution::{
-    ExecutionEngine, OrderExecutor, OrderRequest, PaperOrderExecutor, RetryConfig,
+    ExecutionEngine, OrderExecutor, OrderRequest, OrderSubmitResult, PaperOrderExecutor,
+    RetryConfig,
 };
 use eth_btc_strategy::funding::{FundingRate, estimate_funding_cost};
 use eth_btc_strategy::logging::{EntryBlockReason, LogEvent, TradeEvent, TradeLog};
-use eth_btc_strategy::state::{PositionLeg, PositionSnapshot, StrategyState, StrategyStatus};
+use eth_btc_strategy::state::{
+    PositionLeg, PositionSnapshot, StrategyState, StrategyStatus,
+};
 
 #[derive(Default)]
 struct RecordingExecutor {
@@ -41,6 +45,82 @@ impl OrderExecutor for RecordingExecutor {
     }
 }
 
+#[derive(Default)]
+struct RestingEntryExecutor {
+    submitted: std::sync::Mutex<Vec<OrderRequest>>,
+}
+
+#[async_trait::async_trait]
+impl OrderExecutor for RestingEntryExecutor {
+    async fn submit(
+        &self,
+        order: &OrderRequest,
+    ) -> Result<rust_decimal::Decimal, eth_btc_strategy::execution::ExecutionError> {
+        self.submitted
+            .lock()
+            .expect("submit lock")
+            .push(order.clone());
+        Ok(order.qty)
+    }
+
+    async fn close(
+        &self,
+        order: &OrderRequest,
+    ) -> Result<rust_decimal::Decimal, eth_btc_strategy::execution::ExecutionError> {
+        self.submitted
+            .lock()
+            .expect("submit lock")
+            .push(order.clone());
+        Ok(order.qty)
+    }
+
+    async fn submit_result(
+        &self,
+        order: &OrderRequest,
+    ) -> Result<OrderSubmitResult, eth_btc_strategy::execution::ExecutionError> {
+        self.submitted
+            .lock()
+            .expect("submit lock")
+            .push(order.clone());
+        let oid = if order.symbol == Symbol::EthPerp { 11 } else { 22 };
+        Ok(OrderSubmitResult::Resting { oid })
+    }
+}
+
+#[derive(Default)]
+struct CancelTrackingExecutor {
+    cancelled: std::sync::Mutex<Vec<(Symbol, u64)>>,
+}
+
+#[async_trait::async_trait]
+impl OrderExecutor for CancelTrackingExecutor {
+    async fn submit(
+        &self,
+        _order: &OrderRequest,
+    ) -> Result<rust_decimal::Decimal, eth_btc_strategy::execution::ExecutionError> {
+        Ok(dec!(0))
+    }
+
+    async fn close(
+        &self,
+        _order: &OrderRequest,
+    ) -> Result<rust_decimal::Decimal, eth_btc_strategy::execution::ExecutionError> {
+        Ok(dec!(0))
+    }
+
+    async fn cancel(
+        &self,
+        symbol: Symbol,
+        oid: u64,
+    ) -> Result<(), eth_btc_strategy::execution::ExecutionError> {
+        self.cancelled
+            .lock()
+            .expect("cancel lock")
+            .push((symbol, oid));
+        Ok(())
+    }
+}
+
 #[test]
 fn strategy_engine_applies_state() {
     let config = Config::default();
@@ -66,6 +146,7 @@ fn strategy_engine_applies_state() {
     let state = StrategyState {
         status: StrategyStatus::InPosition,
         position: Some(position),
+        pending_entry: None,
         cooldown_until: None,
     };
 
@@ -218,6 +299,7 @@ async fn strategy_engine_repairs_residual_leg_and_flats_state() {
     let state = StrategyState {
         status: StrategyStatus::InPosition,
         position: Some(position),
+        pending_entry: None,
         cooldown_until: None,
     };
     engine.apply_state(state).unwrap();
@@ -341,6 +423,195 @@ async fn strategy_engine_sets_limit_price_with_slippage() {
             assert_eq!(limit, btc_price * (rust_decimal::Decimal::ONE + slippage));
         }
     }
+}
+
+#[tokio::test]
+async fn strategy_engine_post_only_entry_waits_for_exchange_fill() {
+    let mut config = Config::default();
+    config.strategy.n_z = 3;
+    config.position.n_vol = 1;
+    config.strategy.entry_z = dec!(0.5);
+    config.strategy.sl_z = dec!(2.0);
+    config.position.c_value = Some(dec!(100));
+    config.execution.order_type = OrderType::PostOnly;
+    config.execution.post_only_bps = 2;
+    config.execution.post_only_ttl_secs = 900;
+
+    let recorder = std::sync::Arc::new(RestingEntryExecutor::default());
+    let execution = ExecutionEngine::new(recorder.clone(), RetryConfig::fast());
+    let mut engine = StrategyEngine::new(config.clone(), execution).unwrap();
+
+    for offset in [0, 900, 1800] {
+        let bar = eth_btc_strategy::core::strategy::StrategyBar {
+            timestamp: Utc.timestamp_opt(offset, 0).unwrap(),
+            eth_price: dec!(100),
+            btc_price: dec!(100),
+            equity: None,
+            funding_eth: None,
+            funding_btc: None,
+            funding_interval_hours: None,
+        };
+        engine.process_bar(bar).await.unwrap();
+    }
+
+    let entry_bar = eth_btc_strategy::core::strategy::StrategyBar {
+        timestamp: Utc.timestamp_opt(2700, 0).unwrap(),
+        eth_price: dec!(271.8281828),
+        btc_price: dec!(100),
+        equity: None,
+        funding_eth: None,
+        funding_btc: None,
+        funding_interval_hours: None,
+    };
+    let pending = engine.process_bar(entry_bar).await.unwrap();
+
+    assert_eq!(pending.state, StrategyStatus::PendingEntry);
+    assert!(pending.trade_logs.is_empty());
+    assert_eq!(pending.events, vec![LogEvent::EntrySubmitted]);
+
+    let exposure = PairExposure {
+        eth: Some(ExchangePosition {
+            qty: dec!(0.184),
+            entry_price: dec!(271.7),
+            notional: dec!(50.0),
+        }),
+        btc: Some(ExchangePosition {
+            qty: dec!(-0.0008),
+            entry_price: dec!(100.1),
+            notional: dec!(50.0),
+        }),
+    };
+    engine
+        .reconcile_exchange_position(&exposure, Utc.timestamp_opt(3600, 0).unwrap())
+        .await
+        .unwrap();
+
+    let fill_bar = eth_btc_strategy::core::strategy::StrategyBar {
+        timestamp: Utc.timestamp_opt(3600, 0).unwrap(),
+        eth_price: dec!(271.7),
+        btc_price: dec!(100.1),
+        equity: None,
+        funding_eth: None,
+        funding_btc: None,
+        funding_interval_hours: None,
+    };
+    let filled = engine.process_bar(fill_bar).await.unwrap();
+
+    assert_eq!(filled.state, StrategyStatus::InPosition);
+    assert!(filled.events.contains(&LogEvent::Entry));
+    assert_eq!(filled.trade_logs.len(), 1);
+    assert_eq!(filled.trade_logs[0].eth_price, dec!(271.7));
+    assert_eq!(filled.trade_logs[0].btc_price, dec!(100.1));
+}
+
+#[tokio::test]
+async fn strategy_engine_forces_market_exit_when_post_only_is_configured() {
+    let mut config = Config::default();
+    config.strategy.n_z = 3;
+    config.position.n_vol = 1;
+    config.strategy.entry_z = dec!(0.5);
+    config.strategy.tp_z = dec!(0.45);
+    config.strategy.sl_z = dec!(2.0);
+    config.position.c_value = Some(dec!(100));
+    config.execution.order_type = OrderType::PostOnly;
+    config.execution.post_only_bps = 2;
+
+    let recorder = std::sync::Arc::new(RecordingExecutor::default());
+    let execution = ExecutionEngine::new(recorder.clone(), RetryConfig::fast());
+    let mut engine = StrategyEngine::new(config.clone(), execution).unwrap();
+
+    let state = StrategyState {
+        status: StrategyStatus::InPosition,
+        position: Some(PositionSnapshot {
+            direction: TradeDirection::LongEthShortBtc,
+            entry_time: Utc.timestamp_opt(0, 0).unwrap(),
+            eth: PositionLeg {
+                qty: dec!(1),
+                avg_price: dec!(100),
+                notional: dec!(100),
+            },
+            btc: PositionLeg {
+                qty: dec!(-1),
+                avg_price: dec!(100),
+                notional: dec!(100),
+            },
+        }),
+        pending_entry: None,
+        cooldown_until: None,
+    };
+    engine.apply_state(state).unwrap();
+
+    for offset in [0, 900, 1800] {
+        let bar = eth_btc_strategy::core::strategy::StrategyBar {
+            timestamp: Utc.timestamp_opt(offset, 0).unwrap(),
+            eth_price: dec!(100),
+            btc_price: dec!(100),
+            equity: None,
+            funding_eth: None,
+            funding_btc: None,
+            funding_interval_hours: None,
+        };
+        engine.process_bar(bar).await.unwrap();
+    }
+
+    let exit_bar = eth_btc_strategy::core::strategy::StrategyBar {
+        timestamp: Utc.timestamp_opt(2700, 0).unwrap(),
+        eth_price: dec!(100),
+        btc_price: dec!(100),
+        equity: None,
+        funding_eth: None,
+        funding_btc: None,
+        funding_interval_hours: None,
+    };
+    let _ = engine.process_bar(exit_bar).await.unwrap();
+
+    let submitted = recorder.submitted.lock().expect("submit lock");
+    assert!(submitted.iter().all(|order| order.order_type == OrderType::Market));
+}
+
+#[tokio::test]
+async fn strategy_engine_cancels_expired_pending_entry_before_flattening() {
+    let mut config = Config::default();
+    config.strategy.n_z = 3;
+    config.position.n_vol = 1;
+    let executor = std::sync::Arc::new(CancelTrackingExecutor::default());
+    let execution = ExecutionEngine::new(executor.clone(), RetryConfig::fast());
+    let mut engine = StrategyEngine::new(config, execution).unwrap();
+
+    engine
+        .apply_state(StrategyState {
+            status: StrategyStatus::PendingEntry,
+            position: None,
+            pending_entry: Some(eth_btc_strategy::state::PendingEntrySnapshot {
+                direction: TradeDirection::LongEthShortBtc,
+                eth_qty: dec!(0.01),
+                btc_qty: dec!(-0.001),
+                eth_order_id: 11,
+                btc_order_id: 22,
+                submitted_at: Utc.timestamp_opt(100, 0).unwrap(),
+                expires_at: Utc.timestamp_opt(200, 0).unwrap(),
+            }),
+            cooldown_until: None,
+        })
+        .unwrap();
+
+    let outcome = engine
+        .process_bar(eth_btc_strategy::core::strategy::StrategyBar {
+            timestamp: Utc.timestamp_opt(200, 0).unwrap(),
+            eth_price: dec!(2000),
+            btc_price: dec!(60000),
+            equity: None,
+            funding_eth: None,
+            funding_btc: None,
+            funding_interval_hours: None,
+        })
+        .await
+        .unwrap();
+
+    let cancelled = executor.cancelled.lock().expect("cancel lock").clone();
+    assert_eq!(cancelled, vec![(Symbol::EthPerp, 11), (Symbol::BtcPerp, 22)]);
+    assert_eq!(outcome.state, StrategyStatus::Flat);
+    assert!(outcome.events.contains(&LogEvent::EntryCancelled));
 }
 
 #[tokio::test]

@@ -44,6 +44,7 @@ pub enum Command {
     Download(DownloadArgs),
     OrderTest(OrderTestArgs),
     MarketTest(MarketTestArgs),
+    CancelOrder(CancelOrderArgs),
 }
 
 #[derive(Debug, Args)]
@@ -96,6 +97,16 @@ pub struct MarketTestArgs {
     pub qty: Decimal,
     #[arg(long, default_value = "25", value_name = "BPS")]
     pub slippage_bps: u32,
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct CancelOrderArgs {
+    #[arg(long, value_name = "SYMBOL")]
+    pub symbol: Symbol,
+    #[arg(long, value_name = "OID")]
+    pub oid: u64,
     #[arg(long)]
     pub dry_run: bool,
 }

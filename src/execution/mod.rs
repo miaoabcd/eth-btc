@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use alloy_primitives::{Address, B256, keccak256};
 use alloy_signer::SignerSync;
 use alloy_signer_local::PrivateKeySigner;
@@ -58,6 +59,7 @@ pub struct OrderRequest {
     pub qty: Decimal,
     pub order_type: OrderType,
     pub limit_price: Option<Decimal>,
+    pub expires_after: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -66,7 +68,22 @@ pub struct OrderHttpResponse {
     pub body: String,
 }
 
-#[async_trait::async_trait]
+#[derive(Debug, Clone, PartialEq)]
+pub enum OrderSubmitResult {
+    Filled(Decimal),
+    Resting { oid: u64 },
+}
+
+impl OrderSubmitResult {
+    fn expect_filled(self) -> Result<Decimal, ExecutionError> {
+        match self {
+            Self::Filled(qty) => Ok(qty),
+            Self::Resting { .. } => Err(ExecutionError::Fatal("order resting on book".to_string())),
+        }
+    }
+}
+
+#[async_trait]
 pub trait OrderHttpClient: Send + Sync {
     async fn post(&self, url: &str, body: Value) -> Result<OrderHttpResponse, ExecutionError>;
 }
@@ -138,10 +155,27 @@ impl Default for RetryConfig {
     }
 }
 
-#[async_trait::async_trait]
+#[async_trait]
 pub trait OrderExecutor: Send + Sync {
     async fn submit(&self, order: &OrderRequest) -> Result<Decimal, ExecutionError>;
     async fn close(&self, order: &OrderRequest) -> Result<Decimal, ExecutionError>;
+    async fn cancel(&self, _symbol: Symbol, _oid: u64) -> Result<(), ExecutionError> {
+        Ok(())
+    }
+
+    async fn submit_result(
+        &self,
+        order: &OrderRequest,
+    ) -> Result<OrderSubmitResult, ExecutionError> {
+        self.submit(order).await.map(OrderSubmitResult::Filled)
+    }
+
+    async fn close_result(
+        &self,
+        order: &OrderRequest,
+    ) -> Result<OrderSubmitResult, ExecutionError> {
+        self.close(order).await.map(OrderSubmitResult::Filled)
+    }
 }
 
 #[derive(Clone)]
@@ -225,6 +259,10 @@ enum HyperliquidExchangeAction {
         is_cross: bool,
         leverage: u32,
     },
+    #[serde(rename = "cancel")]
+    Cancel {
+        cancels: Vec<HyperliquidCancelRequest>,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -251,6 +289,14 @@ struct HyperliquidOrderRequest {
 }
 
 #[derive(Debug, Serialize)]
+struct HyperliquidCancelRequest {
+    #[serde(rename = "a")]
+    asset: u32,
+    #[serde(rename = "o")]
+    oid: u64,
+}
+
+#[derive(Debug, Serialize)]
 struct HyperliquidOrderType {
     #[serde(rename = "limit")]
     limit: HyperliquidLimitParams,
@@ -269,10 +315,17 @@ impl HyperliquidOrderType {
         }
     }
 
+    fn alo_limit() -> Self {
+        Self {
+            limit: HyperliquidLimitParams { tif: "Alo" },
+        }
+    }
+
     fn from_order_type(order_type: OrderType) -> Self {
         match order_type {
             OrderType::Market => Self::ioc_limit(),
             OrderType::Limit => Self::gtc_limit(),
+            OrderType::PostOnly => Self::alo_limit(),
         }
     }
 }
@@ -297,7 +350,7 @@ struct HyperliquidExecResponse {
 }
 
 impl HyperliquidExecResponse {
-    fn filled_qty(self) -> Result<Decimal, ExecutionError> {
+    fn order_result(self) -> Result<OrderSubmitResult, ExecutionError> {
         if self.status != "ok" {
             return Err(ExecutionError::Fatal(format!(
                 "exchange response status {}",
@@ -305,7 +358,7 @@ impl HyperliquidExecResponse {
             )));
         }
         match self.response {
-            HyperliquidExecResponseData::Order { data } => data.filled_qty(),
+            HyperliquidExecResponseData::Order { data } => data.order_result(),
             _ => Err(ExecutionError::Fatal(
                 "unexpected exchange response".to_string(),
             )),
@@ -321,6 +374,21 @@ impl HyperliquidExecResponse {
         }
         Ok(())
     }
+
+    fn cancel_result(self) -> Result<(), ExecutionError> {
+        if self.status != "ok" {
+            return Err(ExecutionError::Fatal(format!(
+                "exchange response status {}",
+                self.status
+            )));
+        }
+        match self.response {
+            HyperliquidExecResponseData::Cancel { data } => data.cancel_result(),
+            _ => Err(ExecutionError::Fatal(
+                "unexpected exchange response".to_string(),
+            )),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -335,6 +403,10 @@ enum HyperliquidExecResponseData {
         #[allow(dead_code)]
         data: serde_json::Value,
     },
+    #[serde(rename = "cancel")]
+    Cancel {
+        data: HyperliquidExecCancelResponseData,
+    },
     #[serde(other)]
     Unknown,
 }
@@ -344,19 +416,49 @@ struct HyperliquidExecOrderResponseData {
     statuses: Vec<HyperliquidExecOrderStatus>,
 }
 
+#[derive(Debug, Deserialize)]
+struct HyperliquidExecCancelResponseData {
+    statuses: Vec<Value>,
+}
+
 impl HyperliquidExecOrderResponseData {
-    fn filled_qty(self) -> Result<Decimal, ExecutionError> {
+    fn order_result(self) -> Result<OrderSubmitResult, ExecutionError> {
         let status = self
             .statuses
             .into_iter()
             .next()
             .ok_or_else(|| ExecutionError::Fatal("empty order status".to_string()))?;
         match status {
-            HyperliquidExecOrderStatus::Filled { filled } => Ok(filled.total_sz),
+            HyperliquidExecOrderStatus::Filled { filled } => Ok(OrderSubmitResult::Filled(
+                filled.total_sz,
+            )),
             HyperliquidExecOrderStatus::Error { error } => Err(ExecutionError::Fatal(error)),
-            HyperliquidExecOrderStatus::Resting { .. } => {
-                Err(ExecutionError::Fatal("order resting on book".to_string()))
+            HyperliquidExecOrderStatus::Resting { resting } => {
+                Ok(OrderSubmitResult::Resting { oid: resting.oid })
             }
+        }
+    }
+}
+
+impl HyperliquidExecCancelResponseData {
+    fn cancel_result(self) -> Result<(), ExecutionError> {
+        let status = self
+            .statuses
+            .into_iter()
+            .next()
+            .ok_or_else(|| ExecutionError::Fatal("empty cancel status".to_string()))?;
+        match status {
+            Value::String(value) if value == "success" => Ok(()),
+            Value::Object(mut value) => match value.remove("error").and_then(|v| v.as_str().map(str::to_string)) {
+                Some(error) => Err(ExecutionError::Fatal(error)),
+                None => Err(ExecutionError::Fatal(format!(
+                    "unexpected cancel status: {}",
+                    Value::Object(value)
+                ))),
+            },
+            other => Err(ExecutionError::Fatal(format!(
+                "unexpected cancel status: {other}"
+            ))),
         }
     }
 }
@@ -368,8 +470,7 @@ enum HyperliquidExecOrderStatus {
         filled: HyperliquidFilledInfo,
     },
     Resting {
-        #[allow(dead_code)]
-        resting: serde_json::Value,
+        resting: HyperliquidRestingInfo,
     },
     Error {
         error: String,
@@ -380,6 +481,11 @@ enum HyperliquidExecOrderStatus {
 struct HyperliquidFilledInfo {
     #[serde(rename = "totalSz")]
     total_sz: Decimal,
+}
+
+#[derive(Debug, Deserialize)]
+struct HyperliquidRestingInfo {
+    oid: u64,
 }
 
 #[derive(Clone)]
@@ -402,6 +508,7 @@ impl HyperliquidSigner {
         action: &HyperliquidExchangeAction,
         nonce: u64,
         vault_address: Option<&str>,
+        expires_after: Option<u64>,
     ) -> Result<B256, ExecutionError> {
         let mut bytes = rmp_serde::to_vec_named(action)
             .map_err(|err| ExecutionError::Fatal(format!("serialize action: {err}")))?;
@@ -414,6 +521,10 @@ impl HyperliquidSigner {
             bytes.extend_from_slice(&vault_bytes);
         } else {
             bytes.push(0);
+        }
+        if let Some(expires_after) = expires_after {
+            bytes.push(0);
+            bytes.extend_from_slice(&expires_after.to_be_bytes());
         }
         Ok(keccak256(&bytes))
     }
@@ -433,8 +544,9 @@ impl HyperliquidSigner {
         nonce: u64,
         is_testnet: bool,
         vault_address: Option<&str>,
+        expires_after: Option<u64>,
     ) -> Result<HyperliquidSignature, ExecutionError> {
-        let connection_id = Self::connection_id(action, nonce, vault_address)?;
+        let connection_id = Self::connection_id(action, nonce, vault_address, expires_after)?;
         let agent = Agent {
             source: if is_testnet {
                 "b".to_string()
@@ -608,10 +720,10 @@ impl LiveOrderExecutor {
 
     async fn asset_spec(&self, symbol: Symbol) -> Result<AssetSpec, ExecutionError> {
         let mut guard = self.asset_specs.lock().await;
-        if let Some(specs) = guard.as_ref() {
-            if let Some(spec) = specs.get(&symbol) {
-                return Ok(*spec);
-            }
+        if let Some(specs) = guard.as_ref()
+            && let Some(spec) = specs.get(&symbol)
+        {
+            return Ok(*spec);
         }
         let specs = self.load_asset_specs().await?;
         let spec = specs
@@ -671,12 +783,12 @@ impl LiveOrderExecutor {
         &self,
         order: &OrderRequest,
         reduce_only: bool,
-    ) -> Result<Decimal, ExecutionError> {
-        if !reduce_only {
-            if let Some(leverage) = self.leverage {
-                self.update_leverage(order.symbol, leverage, self.is_cross)
-                    .await?;
-            }
+    ) -> Result<OrderSubmitResult, ExecutionError> {
+        if !reduce_only
+            && let Some(leverage) = self.leverage
+        {
+            self.update_leverage(order.symbol, leverage, self.is_cross)
+                .await?;
         }
         self.rate_limiter.wait().await;
         let spec = self.asset_spec(order.symbol).await?;
@@ -711,13 +823,14 @@ impl LiveOrderExecutor {
             nonce,
             self.is_testnet,
             self.vault_address.as_deref(),
+            order.expires_after,
         )?;
         let payload = HyperliquidExchangeRequest {
             action,
             nonce,
             signature,
             vault_address: self.vault_address.clone(),
-            expires_after: None,
+            expires_after: order.expires_after,
         };
         let body =
             serde_json::to_value(payload).map_err(|err| ExecutionError::Fatal(err.to_string()))?;
@@ -736,7 +849,7 @@ impl LiveOrderExecutor {
         }
         let parsed: HyperliquidExecResponse = serde_json::from_str(&response.body)
             .map_err(|err| ExecutionError::Fatal(err.to_string()))?;
-        parsed.filled_qty()
+        parsed.order_result()
     }
 
     async fn update_leverage(
@@ -762,6 +875,7 @@ impl LiveOrderExecutor {
             nonce,
             self.is_testnet,
             self.vault_address.as_deref(),
+            None,
         )?;
         let payload = HyperliquidExchangeRequest {
             action,
@@ -791,14 +905,76 @@ impl LiveOrderExecutor {
     }
 }
 
-#[async_trait::async_trait]
+#[async_trait]
 impl OrderExecutor for LiveOrderExecutor {
     async fn submit(&self, order: &OrderRequest) -> Result<Decimal, ExecutionError> {
-        self.post_order(order, false).await
+        self.submit_result(order).await?.expect_filled()
     }
 
     async fn close(&self, order: &OrderRequest) -> Result<Decimal, ExecutionError> {
+        self.close_result(order).await?.expect_filled()
+    }
+
+    async fn submit_result(
+        &self,
+        order: &OrderRequest,
+    ) -> Result<OrderSubmitResult, ExecutionError> {
+        self.post_order(order, false).await
+    }
+
+    async fn close_result(
+        &self,
+        order: &OrderRequest,
+    ) -> Result<OrderSubmitResult, ExecutionError> {
         self.post_order(order, true).await
+    }
+
+    async fn cancel(&self, symbol: Symbol, oid: u64) -> Result<(), ExecutionError> {
+        self.rate_limiter.wait().await;
+        let spec = self.asset_spec(symbol).await?;
+        let action = HyperliquidExchangeAction::Cancel {
+            cancels: vec![HyperliquidCancelRequest {
+                asset: spec.asset_id,
+                oid,
+            }],
+        };
+        let signer = self
+            .signer
+            .as_ref()
+            .ok_or_else(|| ExecutionError::Fatal("missing Hyperliquid private key".to_string()))?;
+        let nonce = self.nonce_provider.next_nonce();
+        let signature = signer.sign(
+            &action,
+            nonce,
+            self.is_testnet,
+            self.vault_address.as_deref(),
+            None,
+        )?;
+        let payload = HyperliquidExchangeRequest {
+            action,
+            nonce,
+            signature,
+            vault_address: self.vault_address.clone(),
+            expires_after: None,
+        };
+        let body =
+            serde_json::to_value(payload).map_err(|err| ExecutionError::Fatal(err.to_string()))?;
+        let response = self.client.post(&self.exchange_url(), body).await?;
+        if response.status >= 500 {
+            return Err(ExecutionError::Transient(format!(
+                "server error {status}",
+                status = response.status
+            )));
+        }
+        if response.status >= 400 {
+            return Err(ExecutionError::Fatal(format!(
+                "client error {status}",
+                status = response.status
+            )));
+        }
+        let parsed: HyperliquidExecResponse = serde_json::from_str(&response.body)
+            .map_err(|err| ExecutionError::Fatal(err.to_string()))?;
+        parsed.cancel_result()
     }
 }
 
@@ -806,6 +982,18 @@ impl OrderExecutor for LiveOrderExecutor {
 pub struct ExecutionEngine {
     executor: Arc<dyn OrderExecutor>,
     retry: RetryConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RestingPairOrders {
+    pub eth_oid: u64,
+    pub btc_oid: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PairOpenOutcome {
+    Filled,
+    Resting(RestingPairOrders),
 }
 
 impl ExecutionEngine {
@@ -817,31 +1005,82 @@ impl ExecutionEngine {
         &self,
         eth_order: OrderRequest,
         btc_order: OrderRequest,
-    ) -> Result<(), ExecutionError> {
-        let eth_fill = self.retry_submit(&eth_order).await;
-        let eth_fill = match eth_fill {
-            Ok(fill) => fill,
-            Err(err) => return Err(err),
-        };
-
-        match self.retry_submit(&btc_order).await {
-            Ok(_) => Ok(()),
-            Err(err) => {
-                let rollback = self
-                    .retry_close(&OrderRequest {
-                        symbol: eth_order.symbol,
-                        side: OrderSide::close_for_qty(eth_fill),
-                        qty: eth_fill.abs(),
-                        order_type: OrderType::Market,
-                        limit_price: eth_order.limit_price,
-                    })
-                    .await;
-                match rollback {
-                    Ok(_) => Err(ExecutionError::PartialFill(format!(
-                        "open second leg failed: {err}; rollback executed"
-                    ))),
-                    Err(rollback_err) => Err(ExecutionError::PartialFill(format!(
-                        "open second leg failed: {err}; rollback failed: {rollback_err}"
+    ) -> Result<PairOpenOutcome, ExecutionError> {
+        let eth_result = self.retry_submit_result(&eth_order).await?;
+        match eth_result {
+            OrderSubmitResult::Filled(eth_fill) => match self.retry_submit_result(&btc_order).await
+            {
+                Ok(OrderSubmitResult::Filled(_)) => Ok(PairOpenOutcome::Filled),
+                Ok(OrderSubmitResult::Resting { .. }) => {
+                    let rollback = self
+                        .retry_close(&OrderRequest {
+                            symbol: eth_order.symbol,
+                            side: OrderSide::close_for_qty(eth_fill),
+                            qty: eth_fill.abs(),
+                            order_type: OrderType::Market,
+                            limit_price: eth_order.limit_price,
+                            expires_after: None,
+                        })
+                        .await;
+                    match rollback {
+                        Ok(_) => Err(ExecutionError::PartialFill(
+                            "open second leg is resting while first leg filled; rollback executed"
+                                .to_string(),
+                        )),
+                        Err(rollback_err) => Err(ExecutionError::PartialFill(format!(
+                            "open second leg is resting while first leg filled; rollback failed: {rollback_err}"
+                        ))),
+                    }
+                }
+                Err(err) => {
+                    let rollback = self
+                        .retry_close(&OrderRequest {
+                            symbol: eth_order.symbol,
+                            side: OrderSide::close_for_qty(eth_fill),
+                            qty: eth_fill.abs(),
+                            order_type: OrderType::Market,
+                            limit_price: eth_order.limit_price,
+                            expires_after: None,
+                        })
+                        .await;
+                    match rollback {
+                        Ok(_) => Err(ExecutionError::PartialFill(format!(
+                            "open second leg failed: {err}; rollback executed"
+                        ))),
+                        Err(rollback_err) => Err(ExecutionError::PartialFill(format!(
+                            "open second leg failed: {err}; rollback failed: {rollback_err}"
+                        ))),
+                    }
+                }
+            },
+            OrderSubmitResult::Resting { oid: eth_oid } => {
+                match self.retry_submit_result(&btc_order).await {
+                    Ok(OrderSubmitResult::Resting { oid: btc_oid }) => {
+                        Ok(PairOpenOutcome::Resting(RestingPairOrders { eth_oid, btc_oid }))
+                    }
+                    Ok(OrderSubmitResult::Filled(btc_fill)) => {
+                        let rollback = self
+                            .retry_close(&OrderRequest {
+                                symbol: btc_order.symbol,
+                                side: OrderSide::close_for_qty(btc_fill),
+                                qty: btc_fill.abs(),
+                                order_type: OrderType::Market,
+                                limit_price: btc_order.limit_price,
+                                expires_after: None,
+                            })
+                            .await;
+                        match rollback {
+                            Ok(_) => Err(ExecutionError::PartialFill(
+                                "open first leg is resting while second leg filled; rollback executed"
+                                    .to_string(),
+                            )),
+                            Err(rollback_err) => Err(ExecutionError::PartialFill(format!(
+                                "open first leg is resting while second leg filled; rollback failed: {rollback_err}"
+                            ))),
+                        }
+                    }
+                    Err(err) => Err(ExecutionError::Fatal(format!(
+                        "open second leg failed while first leg is resting until expiry: {err}"
                     ))),
                 }
             }
@@ -865,6 +1104,7 @@ impl ExecutionEngine {
                 qty: eth_fill.abs(),
                 order_type: eth_order.order_type,
                 limit_price: eth_order.limit_price,
+                expires_after: None,
             };
             let rollback = self.retry_submit(&rollback_order).await;
             return match rollback {
@@ -887,6 +1127,7 @@ impl ExecutionEngine {
                 qty: position.eth.qty.abs(),
                 order_type: OrderType::Market,
                 limit_price: Some(position.eth.avg_price),
+                expires_after: None,
             };
             return self.retry_close(&order).await.map(|_| ());
         }
@@ -897,10 +1138,15 @@ impl ExecutionEngine {
                 qty: position.btc.qty.abs(),
                 order_type: OrderType::Market,
                 limit_price: Some(position.btc.avg_price),
+                expires_after: None,
             };
             return self.retry_close(&order).await.map(|_| ());
         }
         Ok(())
+    }
+
+    pub async fn cancel_order(&self, symbol: Symbol, oid: u64) -> Result<(), ExecutionError> {
+        self.retry_cancel(symbol, oid).await
     }
 
     async fn retry_submit(&self, order: &OrderRequest) -> Result<Decimal, ExecutionError> {
@@ -910,11 +1156,28 @@ impl ExecutionEngine {
         self.retry_with(|| self.executor.submit(order)).await
     }
 
+    async fn retry_submit_result(
+        &self,
+        order: &OrderRequest,
+    ) -> Result<OrderSubmitResult, ExecutionError> {
+        if matches!(order.order_type, OrderType::Market) {
+            return self
+                .retry_market_with_requote(order, false)
+                .await
+                .map(OrderSubmitResult::Filled);
+        }
+        self.retry_with(|| self.executor.submit_result(order)).await
+    }
+
     async fn retry_close(&self, order: &OrderRequest) -> Result<Decimal, ExecutionError> {
         if matches!(order.order_type, OrderType::Market) {
             return self.retry_market_with_requote(order, true).await;
         }
         self.retry_with(|| self.executor.close(order)).await
+    }
+
+    async fn retry_cancel(&self, symbol: Symbol, oid: u64) -> Result<(), ExecutionError> {
+        self.retry_with(|| self.executor.cancel(symbol, oid)).await
     }
 
     fn is_ioc_no_match(err: &ExecutionError) -> bool {
@@ -990,10 +1253,10 @@ impl ExecutionEngine {
         ))
     }
 
-    async fn retry_with<F, Fut>(&self, mut action: F) -> Result<Decimal, ExecutionError>
+    async fn retry_with<T, F, Fut>(&self, mut action: F) -> Result<T, ExecutionError>
     where
         F: FnMut() -> Fut,
-        Fut: std::future::Future<Output = Result<Decimal, ExecutionError>>,
+        Fut: std::future::Future<Output = Result<T, ExecutionError>>,
     {
         let mut delay = self.retry.base_delay_ms;
         let attempts = self.retry.max_attempts.max(1);

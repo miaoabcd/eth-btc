@@ -11,7 +11,8 @@ fn order(symbol: Symbol, side: OrderSide) -> OrderRequest {
         side,
         qty: dec!(1),
         order_type: OrderType::Market,
-        limit_price: None,
+        limit_price: Some(dec!(1)),
+        expires_after: None,
     }
 }
 

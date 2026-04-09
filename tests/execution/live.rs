@@ -7,7 +7,7 @@ use rust_decimal_macros::dec;
 use eth_btc_strategy::config::{OrderType, Symbol};
 use eth_btc_strategy::execution::{
     ExecutionError, HyperliquidSigner, LiveOrderExecutor, NonceProvider, OrderExecutor,
-    OrderHttpClient, OrderHttpResponse, OrderRequest, OrderSide,
+    OrderHttpClient, OrderHttpResponse, OrderRequest, OrderSide, OrderSubmitResult,
 };
 use eth_btc_strategy::util::rate_limiter::RateLimiter;
 
@@ -100,6 +100,7 @@ fn order() -> OrderRequest {
         qty: dec!(1.25),
         order_type: OrderType::Market,
         limit_price: Some(dec!(2010.0)),
+        expires_after: None,
     }
 }
 
@@ -149,6 +150,114 @@ async fn live_executor_posts_order_payload() {
     assert!(sig_r.starts_with("0x") && sig_r.len() == 66);
     assert!(sig_s.starts_with("0x") && sig_s.len() == 66);
     assert!(sig_v == 27 || sig_v == 28);
+}
+
+#[tokio::test]
+async fn live_executor_posts_post_only_order_with_expiry_and_resting_oid() {
+    let client = std::sync::Arc::new(MockOrderHttpClient::default());
+    client.push_response(OrderHttpResponse {
+        status: 200,
+        body: r#"{"universe":[{"name":"ETH","szDecimals":3},{"name":"BTC","szDecimals":3}]}"#
+            .to_string(),
+    });
+    client.push_response(OrderHttpResponse {
+        status: 200,
+        body: r#"{"status":"ok","response":{"type":"order","data":{"statuses":[{"resting":{"oid":42}}]}}}"#
+            .to_string(),
+    });
+
+    let executor = signed_executor(client.clone());
+    let resting = executor
+        .submit_result(&OrderRequest {
+            symbol: Symbol::EthPerp,
+            side: OrderSide::Buy,
+            qty: dec!(1.25),
+            order_type: OrderType::PostOnly,
+            limit_price: Some(dec!(2000.0)),
+            expires_after: Some(1_700_000_900_000),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(resting, OrderSubmitResult::Resting { oid: 42 });
+
+    let requests = client.requests.lock().expect("requests lock");
+    let recorded = requests.last().expect("recorded request");
+    assert_eq!(recorded.body["expiresAfter"], 1_700_000_900_000u64);
+    assert_eq!(recorded.body["action"]["orders"][0]["t"]["limit"]["tif"], "Alo");
+}
+
+#[tokio::test]
+async fn live_executor_signs_expires_after_into_post_only_order() {
+    let client = std::sync::Arc::new(MockOrderHttpClient::default());
+    client.push_response(OrderHttpResponse {
+        status: 200,
+        body: r#"{"universe":[{"name":"ETH","szDecimals":3},{"name":"BTC","szDecimals":3}]}"#
+            .to_string(),
+    });
+    client.push_response(OrderHttpResponse {
+        status: 200,
+        body: r#"{"status":"ok","response":{"type":"order","data":{"statuses":[{"resting":{"oid":41}}]}}}"#
+            .to_string(),
+    });
+    client.push_response(OrderHttpResponse {
+        status: 200,
+        body: r#"{"status":"ok","response":{"type":"order","data":{"statuses":[{"resting":{"oid":42}}]}}}"#
+            .to_string(),
+    });
+
+    let executor = signed_executor(client.clone());
+    executor
+        .submit_result(&OrderRequest {
+            symbol: Symbol::EthPerp,
+            side: OrderSide::Buy,
+            qty: dec!(1.25),
+            order_type: OrderType::PostOnly,
+            limit_price: Some(dec!(2000.0)),
+            expires_after: None,
+        })
+        .await
+        .unwrap();
+    executor
+        .submit_result(&OrderRequest {
+            symbol: Symbol::EthPerp,
+            side: OrderSide::Buy,
+            qty: dec!(1.25),
+            order_type: OrderType::PostOnly,
+            limit_price: Some(dec!(2000.0)),
+            expires_after: Some(1_700_000_900_000),
+        })
+        .await
+        .unwrap();
+
+    let requests = client.requests.lock().expect("requests lock");
+    let first_signature = requests[1].body["signature"].clone();
+    let second_signature = requests[2].body["signature"].clone();
+    assert_ne!(first_signature, second_signature);
+}
+
+#[tokio::test]
+async fn live_executor_posts_cancel_payload() {
+    let client = std::sync::Arc::new(MockOrderHttpClient::default());
+    client.push_response(OrderHttpResponse {
+        status: 200,
+        body: r#"{"universe":[{"name":"ETH","szDecimals":3},{"name":"BTC","szDecimals":3}]}"#
+            .to_string(),
+    });
+    client.push_response(OrderHttpResponse {
+        status: 200,
+        body: r#"{"status":"ok","response":{"type":"cancel","data":{"statuses":["success"]}}}"#
+            .to_string(),
+    });
+
+    let executor = signed_executor(client.clone());
+    executor.cancel(Symbol::EthPerp, 42).await.unwrap();
+
+    let requests = client.requests.lock().expect("requests lock");
+    let recorded = requests.last().expect("recorded request");
+    assert_eq!(recorded.body["action"]["type"], "cancel");
+    assert_eq!(recorded.body["action"]["cancels"][0]["a"], 0);
+    assert_eq!(recorded.body["action"]["cancels"][0]["o"], 42);
 }
 
 #[tokio::test]
@@ -213,6 +322,7 @@ async fn live_executor_updates_leverage_before_btc_order() {
             qty: dec!(0.01),
             order_type: OrderType::Market,
             limit_price: Some(dec!(70000)),
+            expires_after: None,
         })
         .await
         .unwrap();

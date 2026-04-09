@@ -315,6 +315,7 @@ async fn runner_flattens_local_state_when_exchange_is_flat() {
                     notional: dec!(3000),
                 },
             }),
+            pending_entry: None,
             cooldown_until: None,
         })
         .unwrap();

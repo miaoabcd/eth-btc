@@ -38,12 +38,16 @@ Key behaviors:
 - `execution.leverage` is optional. If set, `updateLeverage` is sent before open orders.
 - `funding.modes = ["THRESHOLD"]` is now enforced in entry gating: effective entry threshold becomes `entry_z + k * normalized_funding_cost`.
 - `runtime.once = true` runs one cycle and exits (useful for cron scheduling).
+- `execution.order_type = "POST_ONLY"` enables passive maker-style entry orders. If both legs rest successfully, the strategy enters a local `PendingEntry` state and waits for the next reconciliation cycle to confirm the actual fill.
+- `POST_ONLY` is currently entry-only. Exits still use marketable orders so take-profit / stop-loss logic is not left resting on the book.
+- `execution.post_only_ttl_secs` is a bot-side pending-entry timeout, not an exchange-native order TTL. When it expires, the runner cancels the resting maker orders on the next cycle.
 
 Statistics log:
 
 - `[logging].stats_path` writes one record per 15m bar (r/mu/sigma/sigma_eff/zscore, weights, notional, funding fields, state, `unrealized_pnl`).
 - `[logging].trade_path` writes per-entry/per-exit records (`realized_pnl`, `cumulative_realized_pnl`).
 - If `[logging].price_db_path` points to `.sqlite`, fetched bars are persisted to SQLite (`price_bars`) and can be reused by backtest.
+- For maker entry diagnostics, stats records now distinguish "no signal" from "signal blocked" cases via `entry_block_reason`, and `trade_path` records `EntrySubmitted` before a passive order becomes a live position.
 
 Quick queries (JSON format examples):
 
@@ -125,6 +129,31 @@ Credential precedence in live mode:
 1. `--private-key` (or legacy `--api-key`)
 2. `auth.private_key` in TOML config
 
+### Execution modes
+
+`[execution].order_type` supports three modes:
+
+- `MARKET`: submits IOC-style marketable limit orders using `slippage_bps`.
+- `LIMIT`: submits standard GTC limit orders at the model price.
+- `POST_ONLY`: submits ALO/passive entry orders using `post_only_bps` and `post_only_ttl_secs`.
+
+Recommended starting point for maker entries:
+
+```toml
+[execution]
+order_type = "POST_ONLY"
+slippage_bps = 5
+post_only_bps = 2
+post_only_ttl_secs = 840
+```
+
+Notes:
+
+- `post_only_bps = 2` means the order is quoted 2 bps inside the passive side of the book.
+- `post_only_ttl_secs = 840` means the bot will cancel unfilled resting maker orders after 14 minutes on the next strategy cycle.
+- If both legs are accepted as resting orders, the strategy moves to `PendingEntry`, waits for exchange reconciliation before logging a real `Entry`, and actively cancels the outstanding orders when the local timeout is reached.
+- Exit orders ignore `POST_ONLY` and still execute as marketable orders.
+
 ### Order test (single IOC order)
 
 Use `order-test` to validate signing + exchange connectivity without running the full strategy.
@@ -138,6 +167,18 @@ cargo run --release -- order-test \
 ```
 
 Add `--reduce-only` to send a reduce-only close, or `--dry-run` to print the order payload without submitting.
+
+### Cancel a resting order
+
+Use `cancel-order` to explicitly cancel a known Hyperliquid order id:
+
+```bash
+cargo run --release -- cancel-order \
+  --symbol ETH-PERP \
+  --oid 375051900617
+```
+
+Add `--dry-run` to print the request intent without submitting it.
 
 ### Useful flags
 
@@ -197,6 +238,7 @@ Config is TOML-first. Runtime environment variables are optional for process beh
 - Set `logging.price_db_path` to persist fetched candles into SQLite for later analysis.
 - Trade log `realized_pnl` (for new exits) deducts estimated funding cost when funding data is available.
 - Residual-leg auto-repair: if only one leg remains, the runner attempts `repair_residual` and logs the event.
+- Passive entry workflow: with `POST_ONLY`, an order can be accepted by the exchange without an immediate fill. The strategy persists this as `PendingEntry`, confirms it on the next balance/position sync if it fills, or explicitly cancels the outstanding resting orders before returning to `Flat`.
 
 ## Tests
 

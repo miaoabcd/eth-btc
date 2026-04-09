@@ -72,6 +72,12 @@ impl ReqwestFundingClient {
     }
 }
 
+impl Default for ReqwestFundingClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait::async_trait]
 impl FundingHttpClient for ReqwestFundingClient {
     async fn post(&self, url: &str, body: Value) -> Result<FundingHttpResponse, FundingError> {
