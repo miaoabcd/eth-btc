@@ -1,7 +1,7 @@
 use clap::Parser;
 use rust_decimal_macros::dec;
 
-use eth_btc_strategy::cli::{Cli, Command};
+use eth_btc_strategy::cli::{AnalyzeOutputFormat, Cli, Command};
 use eth_btc_strategy::config::Symbol;
 use eth_btc_strategy::execution::OrderSide;
 
@@ -157,6 +157,39 @@ fn cli_parses_cancel_order_subcommand() {
             assert_eq!(args.symbol, Symbol::EthPerp);
             assert_eq!(args.oid, 42);
             assert!(args.dry_run);
+        }
+        other => panic!("unexpected command {other:?}"),
+    }
+}
+
+#[test]
+fn cli_parses_analyze_trades_subcommand() {
+    let cli = Cli::try_parse_from([
+        "bin",
+        "analyze-trades",
+        "--trade-history",
+        "data/trade_history.csv",
+        "--stats-log",
+        "data/logs/stats.log",
+        "--since",
+        "2026-03-08T00:00:00Z",
+        "--format",
+        "json",
+    ])
+    .unwrap();
+
+    match cli.command {
+        Some(Command::AnalyzeTrades(args)) => {
+            assert_eq!(
+                args.trade_history.unwrap().to_str().unwrap(),
+                "data/trade_history.csv"
+            );
+            assert_eq!(
+                args.stats_log.unwrap().to_str().unwrap(),
+                "data/logs/stats.log"
+            );
+            assert_eq!(args.since.unwrap(), "2026-03-08T00:00:00Z");
+            assert_eq!(args.format, AnalyzeOutputFormat::Json);
         }
         other => panic!("unexpected command {other:?}"),
     }

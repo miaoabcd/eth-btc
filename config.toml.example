@@ -13,6 +13,12 @@ tp_z = 0.45
 # stop-loss threshold (abs z >= sl_z)
 sl_z = 3.5
 
+[stale_cross]
+# cooldown-aware recovery for missed crossing signals after stop-loss cooldown releases
+enabled = false
+max_age_bars = 4
+require_reverting = true
+
 [sigma_floor]
 # mode: CONST | QUANTILE | EWMA_MIX
 mode = "CONST"
@@ -54,6 +60,23 @@ funding_threshold_k = 400
 funding_size_alpha = 0.5
 # minimum capital ratio when size reduction applied (0..1)
 c_min_ratio = 0.3
+
+[cost_gate]
+# Cost-aware entry diagnostics / gate.
+# enabled=true computes expected_edge_bps, estimated_cost_bps, estimated_net_edge_bps, and cost_gate_pass in stats logs.
+# enforce=false is shadow mode; set enforce=true only after reviewing shadow results.
+enabled = false
+enforce = false
+# minimum net edge required after all estimated costs when enforce=true
+min_net_edge_bps = 1.0
+# estimated round-trip cost components, in bps of total pair notional
+entry_fee_bps = 3.4
+exit_fee_bps = 4.4
+slippage_bps = 1.0
+spread_bps = 0.5
+# optional direction-specific extra required net edge, useful when one direction is weaker after fees
+long_eth_short_btc_extra_bps = 0.0
+short_eth_long_btc_extra_bps = 0.0
 
 [risk]
 # maximum holding time in hours

@@ -37,6 +37,9 @@ Key behaviors:
 - `position.c_mode = "EQUITY_RATIO"` uses account equity from Hyperliquid `marginSummary.totalRawUsd` in live mode.
 - `execution.leverage` is optional. If set, `updateLeverage` is sent before open orders.
 - `funding.modes = ["THRESHOLD"]` is now enforced in entry gating: effective entry threshold becomes `entry_z + k * normalized_funding_cost`.
+- `funding.funding_cost_threshold` is denominated in estimated quote-currency cost for the configured position size, not bps.
+- `[cost_gate]` can compute cost-aware entry diagnostics in shadow mode and, when `enforce = true`, block entries whose estimated net edge is below `min_net_edge_bps`.
+- `[stale_cross]` is an optional guarded recovery path for missed crossing signals after a stop-loss cooldown releases; it only fires inside a short recovery window when z-score is still in the entry band and is reverting.
 - `runtime.once = true` runs one cycle and exits (useful for cron scheduling).
 - `execution.order_type = "POST_ONLY"` enables passive maker-style entry orders. If both legs rest successfully, the strategy enters a local `PendingEntry` state and waits for the next reconciliation cycle to confirm the actual fill.
 - `POST_ONLY` is currently entry-only. Exits still use marketable orders so take-profit / stop-loss logic is not left resting on the book.
@@ -44,7 +47,7 @@ Key behaviors:
 
 Statistics log:
 
-- `[logging].stats_path` writes one record per 15m bar (r/mu/sigma/sigma_eff/zscore, weights, notional, funding fields, state, `unrealized_pnl`).
+- `[logging].stats_path` writes one record per 15m bar (r/mu/sigma/sigma_eff/zscore, weights, notional, funding fields, cost-gate fields, state, `unrealized_pnl`).
 - `[logging].trade_path` writes per-entry/per-exit records (`realized_pnl`, `cumulative_realized_pnl`, `fee`, `exchange_closed_pnl`, `pnl_source`).
 - In live mode, trade PnL is reconciled from Hyperliquid fills by order id when available: `realized_pnl = closedPnl - fee`, matching the net fill-history/exported trade-history basis. If fills cannot be fetched or matched, the record falls back to `MODEL_ESTIMATE`.
 - If `[logging].price_db_path` points to `.sqlite`, fetched bars are persisted to SQLite (`price_bars`) and can be reused by backtest.
@@ -62,6 +65,17 @@ jq -c 'select(.event | type == "object" and has("Exit")) | {timestamp, event, di
 # Last 20 trade records
 tail -n 20 trades.log | jq -c '.'
 ```
+
+Trade-history attribution:
+
+```bash
+cargo run --bin eth_btc_strategy -- analyze-trades \
+  --trade-history data/trade_history.csv \
+  --stats-log data/logs/stats.log \
+  --since 2026-03-08T00:00:00Z
+```
+
+This reconstructs flat-to-flat cycles and reports paired vs single-leg PnL, fees, net/gross edge bps, direction splits, and optional stats-log candidate replay results.
 
 See `config.toml.example` for all available settings.
 
@@ -154,6 +168,25 @@ Notes:
 - `post_only_ttl_secs = 840` means the bot will cancel unfilled resting maker orders after 14 minutes on the next strategy cycle.
 - If both legs are accepted as resting orders, the strategy moves to `PendingEntry`, waits for exchange reconciliation before logging a real `Entry`, and actively cancels the outstanding orders when the local timeout is reached.
 - Exit orders ignore `POST_ONLY` and still execute as marketable orders.
+
+### Cost-Aware Entry Diagnostics
+
+Use shadow mode first so the bot records edge/cost estimates without changing trading behavior:
+
+```toml
+[cost_gate]
+enabled = true
+enforce = false
+min_net_edge_bps = 1.0
+entry_fee_bps = 3.4
+exit_fee_bps = 4.4
+slippage_bps = 1.0
+spread_bps = 0.5
+long_eth_short_btc_extra_bps = 0.0
+short_eth_long_btc_extra_bps = 2.0
+```
+
+When enabled, stats logs include `expected_edge_bps`, `estimated_cost_bps`, `estimated_net_edge_bps`, `cost_gate_required_net_edge_bps`, and `cost_gate_pass`. Set `enforce = true` only after reviewing the shadow distribution.
 
 ### Order test (single IOC order)
 

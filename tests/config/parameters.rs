@@ -51,6 +51,51 @@ fn default_funding_parameters() {
 }
 
 #[test]
+fn default_cost_gate_is_shadow_safe_and_disabled() {
+    let config = get_default_config();
+
+    assert!(!config.cost_gate.enabled);
+    assert!(!config.cost_gate.enforce);
+    assert_eq!(config.cost_gate.min_net_edge_bps, dec!(0));
+    assert!(config.cost_gate.entry_fee_bps >= dec!(0));
+    assert!(config.cost_gate.exit_fee_bps >= dec!(0));
+    assert!(config.cost_gate.slippage_bps >= dec!(0));
+    assert!(config.cost_gate.spread_bps >= dec!(0));
+    assert_eq!(config.cost_gate.long_eth_short_btc_extra_bps, dec!(0));
+    assert_eq!(config.cost_gate.short_eth_long_btc_extra_bps, dec!(0));
+}
+
+#[test]
+fn cost_gate_bps_values_must_be_non_negative() {
+    let mut config = get_default_config();
+    config.cost_gate.min_net_edge_bps = dec!(-0.1);
+
+    let err = config
+        .validate()
+        .expect_err("expected cost gate validation failure");
+    assert!(matches!(
+        err,
+        eth_btc_strategy::config::ConfigError::InvalidValue { field, .. }
+        if field == "cost_gate.min_net_edge_bps"
+    ));
+}
+
+#[test]
+fn direction_specific_cost_buffers_must_be_non_negative() {
+    let mut config = get_default_config();
+    config.cost_gate.short_eth_long_btc_extra_bps = dec!(-1);
+
+    let err = config
+        .validate()
+        .expect_err("expected direction buffer validation failure");
+    assert!(matches!(
+        err,
+        eth_btc_strategy::config::ConfigError::InvalidValue { field, .. }
+        if field == "cost_gate.short_eth_long_btc_extra_bps"
+    ));
+}
+
+#[test]
 fn default_risk_parameters() {
     let config = get_default_config();
 

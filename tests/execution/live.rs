@@ -211,7 +211,10 @@ async fn live_executor_posts_post_only_order_with_expiry_and_resting_oid() {
     let requests = client.requests.lock().expect("requests lock");
     let recorded = requests.last().expect("recorded request");
     assert_eq!(recorded.body["expiresAfter"], 1_700_000_900_000u64);
-    assert_eq!(recorded.body["action"]["orders"][0]["t"]["limit"]["tif"], "Alo");
+    assert_eq!(
+        recorded.body["action"]["orders"][0]["t"]["limit"]["tif"],
+        "Alo"
+    );
 }
 
 #[tokio::test]

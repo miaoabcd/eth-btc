@@ -1,4 +1,5 @@
 pub mod account;
+pub mod analysis;
 pub mod backtest;
 pub mod cli;
 pub mod config;

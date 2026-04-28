@@ -271,6 +271,23 @@ impl Default for StrategyConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StaleCrossConfig {
+    pub enabled: bool,
+    pub max_age_bars: u32,
+    pub require_reverting: bool,
+}
+
+impl Default for StaleCrossConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_age_bars: 4,
+            require_reverting: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SigmaFloorConfig {
     pub mode: SigmaFloorMode,
     pub sigma_floor_const: Decimal,
@@ -335,6 +352,35 @@ impl Default for FundingConfig {
             funding_threshold_k: Some(Decimal::new(5, 1)),
             funding_size_alpha: Some(Decimal::new(5, 1)),
             c_min_ratio: Some(Decimal::new(3, 1)),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CostGateConfig {
+    pub enabled: bool,
+    pub enforce: bool,
+    pub min_net_edge_bps: Decimal,
+    pub entry_fee_bps: Decimal,
+    pub exit_fee_bps: Decimal,
+    pub slippage_bps: Decimal,
+    pub spread_bps: Decimal,
+    pub long_eth_short_btc_extra_bps: Decimal,
+    pub short_eth_long_btc_extra_bps: Decimal,
+}
+
+impl Default for CostGateConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            enforce: false,
+            min_net_edge_bps: Decimal::ZERO,
+            entry_fee_bps: Decimal::ZERO,
+            exit_fee_bps: Decimal::ZERO,
+            slippage_bps: Decimal::ZERO,
+            spread_bps: Decimal::ZERO,
+            long_eth_short_btc_extra_bps: Decimal::ZERO,
+            short_eth_long_btc_extra_bps: Decimal::ZERO,
         }
     }
 }
@@ -502,9 +548,11 @@ impl Default for InstrumentConstraints {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Config {
     pub strategy: StrategyConfig,
+    pub stale_cross: StaleCrossConfig,
     pub sigma_floor: SigmaFloorConfig,
     pub position: PositionConfig,
     pub funding: FundingConfig,
+    pub cost_gate: CostGateConfig,
     pub risk: RiskConfig,
     pub data: DataConfig,
     pub execution: ExecutionConfig,
@@ -524,9 +572,11 @@ impl Default for Config {
 
         Self {
             strategy: StrategyConfig::default(),
+            stale_cross: StaleCrossConfig::default(),
             sigma_floor: SigmaFloorConfig::default(),
             position: PositionConfig::default(),
             funding: FundingConfig::default(),
+            cost_gate: CostGateConfig::default(),
             risk: RiskConfig::default(),
             data: DataConfig::default(),
             execution: ExecutionConfig::default(),
@@ -558,6 +608,12 @@ impl Config {
             return Err(ConfigError::InvalidValue {
                 field: "strategy.tp_z",
                 message: "must be < entry_z".to_string(),
+            });
+        }
+        if self.stale_cross.enabled && self.stale_cross.max_age_bars == 0 {
+            return Err(ConfigError::InvalidValue {
+                field: "stale_cross.max_age_bars",
+                message: "must be > 0 when stale_cross is enabled".to_string(),
             });
         }
         if self.sigma_floor.sigma_floor_const <= Decimal::ZERO {
@@ -631,6 +687,22 @@ impl Config {
                 message: "must be between 0 and 1".to_string(),
             });
         }
+        validate_non_negative_bps(
+            "cost_gate.min_net_edge_bps",
+            self.cost_gate.min_net_edge_bps,
+        )?;
+        validate_non_negative_bps("cost_gate.entry_fee_bps", self.cost_gate.entry_fee_bps)?;
+        validate_non_negative_bps("cost_gate.exit_fee_bps", self.cost_gate.exit_fee_bps)?;
+        validate_non_negative_bps("cost_gate.slippage_bps", self.cost_gate.slippage_bps)?;
+        validate_non_negative_bps("cost_gate.spread_bps", self.cost_gate.spread_bps)?;
+        validate_non_negative_bps(
+            "cost_gate.long_eth_short_btc_extra_bps",
+            self.cost_gate.long_eth_short_btc_extra_bps,
+        )?;
+        validate_non_negative_bps(
+            "cost_gate.short_eth_long_btc_extra_bps",
+            self.cost_gate.short_eth_long_btc_extra_bps,
+        )?;
         if let Some(leverage) = self.execution.leverage
             && leverage == 0
         {
@@ -744,6 +816,15 @@ impl Config {
         if let Some(value) = overrides.strategy.sl_z {
             self.strategy.sl_z = value;
         }
+        if let Some(value) = overrides.stale_cross.enabled {
+            self.stale_cross.enabled = value;
+        }
+        if let Some(value) = overrides.stale_cross.max_age_bars {
+            self.stale_cross.max_age_bars = value;
+        }
+        if let Some(value) = overrides.stale_cross.require_reverting {
+            self.stale_cross.require_reverting = value;
+        }
         if let Some(value) = overrides.sigma_floor.mode {
             self.sigma_floor.mode = value;
         }
@@ -797,6 +878,33 @@ impl Config {
         }
         if let Some(value) = overrides.funding.c_min_ratio {
             self.funding.c_min_ratio = Some(value);
+        }
+        if let Some(value) = overrides.cost_gate.enabled {
+            self.cost_gate.enabled = value;
+        }
+        if let Some(value) = overrides.cost_gate.enforce {
+            self.cost_gate.enforce = value;
+        }
+        if let Some(value) = overrides.cost_gate.min_net_edge_bps {
+            self.cost_gate.min_net_edge_bps = value;
+        }
+        if let Some(value) = overrides.cost_gate.entry_fee_bps {
+            self.cost_gate.entry_fee_bps = value;
+        }
+        if let Some(value) = overrides.cost_gate.exit_fee_bps {
+            self.cost_gate.exit_fee_bps = value;
+        }
+        if let Some(value) = overrides.cost_gate.slippage_bps {
+            self.cost_gate.slippage_bps = value;
+        }
+        if let Some(value) = overrides.cost_gate.spread_bps {
+            self.cost_gate.spread_bps = value;
+        }
+        if let Some(value) = overrides.cost_gate.long_eth_short_btc_extra_bps {
+            self.cost_gate.long_eth_short_btc_extra_bps = value;
+        }
+        if let Some(value) = overrides.cost_gate.short_eth_long_btc_extra_bps {
+            self.cost_gate.short_eth_long_btc_extra_bps = value;
         }
         if let Some(value) = overrides.risk.max_hold_hours {
             self.risk.max_hold_hours = value;
@@ -926,16 +1034,30 @@ impl Config {
     }
 }
 
+fn validate_non_negative_bps(field: &'static str, value: Decimal) -> Result<(), ConfigError> {
+    if value < Decimal::ZERO {
+        return Err(ConfigError::InvalidValue {
+            field,
+            message: "must be >= 0".to_string(),
+        });
+    }
+    Ok(())
+}
+
 #[derive(Debug, Default, Deserialize)]
 pub struct ConfigOverrides {
     #[serde(default)]
     pub strategy: StrategyOverrides,
+    #[serde(default)]
+    pub stale_cross: StaleCrossOverrides,
     #[serde(default)]
     pub sigma_floor: SigmaFloorOverrides,
     #[serde(default)]
     pub position: PositionOverrides,
     #[serde(default)]
     pub funding: FundingOverrides,
+    #[serde(default)]
+    pub cost_gate: CostGateOverrides,
     #[serde(default)]
     pub risk: RiskOverrides,
     #[serde(default)]
@@ -961,6 +1083,13 @@ pub struct StrategyOverrides {
     pub entry_z: Option<Decimal>,
     pub tp_z: Option<Decimal>,
     pub sl_z: Option<Decimal>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct StaleCrossOverrides {
+    pub enabled: Option<bool>,
+    pub max_age_bars: Option<u32>,
+    pub require_reverting: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -991,6 +1120,19 @@ pub struct FundingOverrides {
     pub funding_threshold_k: Option<Decimal>,
     pub funding_size_alpha: Option<Decimal>,
     pub c_min_ratio: Option<Decimal>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct CostGateOverrides {
+    pub enabled: Option<bool>,
+    pub enforce: Option<bool>,
+    pub min_net_edge_bps: Option<Decimal>,
+    pub entry_fee_bps: Option<Decimal>,
+    pub exit_fee_bps: Option<Decimal>,
+    pub slippage_bps: Option<Decimal>,
+    pub spread_bps: Option<Decimal>,
+    pub long_eth_short_btc_extra_bps: Option<Decimal>,
+    pub short_eth_long_btc_extra_bps: Option<Decimal>,
 }
 
 #[derive(Debug, Default, Deserialize)]

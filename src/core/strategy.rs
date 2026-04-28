@@ -10,8 +10,7 @@ use crate::config::{CapitalMode, Config, FundingMode, OrderType, PriceField, Sym
 use crate::core::TradeDirection;
 use crate::core::pipeline::SignalPipeline;
 use crate::execution::{
-    ExecutionEngine, ExecutionError, OrderFill, OrderRequest, OrderSide, PairFill,
-    PairOpenOutcome,
+    ExecutionEngine, ExecutionError, OrderFill, OrderRequest, OrderSide, PairFill, PairOpenOutcome,
 };
 use crate::funding::{FundingRate, apply_funding_controls, estimate_funding_cost};
 use crate::logging::{BarLog, EntryBlockReason, LogEvent, PnlSource, TradeEvent, TradeLog};
@@ -75,6 +74,15 @@ struct FillAccounting {
     exchange_closed_pnl: Option<Decimal>,
     realized_pnl: Decimal,
     source: PnlSource,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CostGateDecision {
+    expected_edge_bps: Decimal,
+    estimated_cost_bps: Decimal,
+    estimated_net_edge_bps: Decimal,
+    required_net_edge_bps: Decimal,
+    pass: bool,
 }
 
 impl std::fmt::Debug for StrategyEngine {
@@ -364,6 +372,11 @@ impl StrategyEngine {
         let mut notional_btc = None;
         let mut funding_cost_est = None;
         let mut funding_skip = None;
+        let mut expected_edge_bps = None;
+        let mut estimated_cost_bps = None;
+        let mut estimated_net_edge_bps = None;
+        let mut cost_gate_required_net_edge_bps = None;
+        let mut cost_gate_pass = None;
         let mut entry_block_reason = None;
 
         if let Some(vol_eth) = vol_snapshot.vol_eth
@@ -466,6 +479,11 @@ impl StrategyEngine {
                         Some(notional_btc_value),
                         funding_cost_est,
                         funding_skip,
+                        expected_edge_bps,
+                        estimated_cost_bps,
+                        estimated_net_edge_bps,
+                        cost_gate_required_net_edge_bps,
+                        cost_gate_pass,
                         entry_block_reason,
                         trade_logs,
                     ));
@@ -485,6 +503,47 @@ impl StrategyEngine {
                         Some(notional_btc_value),
                         funding_cost_est,
                         funding_skip,
+                        expected_edge_bps,
+                        estimated_cost_bps,
+                        estimated_net_edge_bps,
+                        cost_gate_required_net_edge_bps,
+                        cost_gate_pass,
+                        entry_block_reason,
+                        trade_logs,
+                    ));
+                }
+            }
+
+            if let Some(decision) = self.cost_gate_decision(
+                signal.direction,
+                signal.zscore,
+                z_snapshot.sigma_eff,
+                capital,
+                funding_cost_est,
+            ) {
+                expected_edge_bps = Some(decision.expected_edge_bps);
+                estimated_cost_bps = Some(decision.estimated_cost_bps);
+                estimated_net_edge_bps = Some(decision.estimated_net_edge_bps);
+                cost_gate_required_net_edge_bps = Some(decision.required_net_edge_bps);
+                cost_gate_pass = Some(decision.pass);
+                if self.config.cost_gate.enforce && !decision.pass {
+                    entry_block_reason = Some(EntryBlockReason::CostGate);
+                    return Ok(self.build_outcome(
+                        bar,
+                        z_snapshot,
+                        vol_snapshot,
+                        events,
+                        w_eth,
+                        w_btc,
+                        Some(notional_eth_value),
+                        Some(notional_btc_value),
+                        funding_cost_est,
+                        funding_skip,
+                        expected_edge_bps,
+                        estimated_cost_bps,
+                        estimated_net_edge_bps,
+                        cost_gate_required_net_edge_bps,
+                        cost_gate_pass,
                         entry_block_reason,
                         trade_logs,
                     ));
@@ -523,6 +582,11 @@ impl StrategyEngine {
                         Some(notional_btc_value),
                         funding_cost_est,
                         funding_skip,
+                        expected_edge_bps,
+                        estimated_cost_bps,
+                        estimated_net_edge_bps,
+                        cost_gate_required_net_edge_bps,
+                        cost_gate_pass,
                         entry_block_reason,
                         trade_logs,
                     ));
@@ -545,6 +609,11 @@ impl StrategyEngine {
                         Some(notional_btc_value),
                         funding_cost_est,
                         funding_skip,
+                        expected_edge_bps,
+                        estimated_cost_bps,
+                        estimated_net_edge_bps,
+                        cost_gate_required_net_edge_bps,
+                        cost_gate_pass,
                         entry_block_reason,
                         trade_logs,
                     ));
@@ -614,6 +683,11 @@ impl StrategyEngine {
                         notional_btc,
                         funding_cost_est,
                         funding_skip,
+                        expected_edge_bps,
+                        estimated_cost_bps,
+                        estimated_net_edge_bps,
+                        cost_gate_required_net_edge_bps,
+                        cost_gate_pass,
                         entry_block_reason,
                         trade_logs,
                     ));
@@ -836,6 +910,11 @@ impl StrategyEngine {
             notional_btc,
             funding_cost_est,
             funding_skip,
+            expected_edge_bps,
+            estimated_cost_bps,
+            estimated_net_edge_bps,
+            cost_gate_required_net_edge_bps,
+            cost_gate_pass,
             entry_block_reason,
             trade_logs,
         ))
@@ -854,6 +933,11 @@ impl StrategyEngine {
         notional_btc: Option<Decimal>,
         funding_cost_est: Option<Decimal>,
         funding_skip: Option<bool>,
+        expected_edge_bps: Option<Decimal>,
+        estimated_cost_bps: Option<Decimal>,
+        estimated_net_edge_bps: Option<Decimal>,
+        cost_gate_required_net_edge_bps: Option<Decimal>,
+        cost_gate_pass: Option<bool>,
         entry_block_reason: Option<EntryBlockReason>,
         trade_logs: Vec<TradeLog>,
     ) -> StrategyOutcome {
@@ -886,6 +970,11 @@ impl StrategyEngine {
                 funding_btc: bar.funding_btc,
                 funding_cost_est,
                 funding_skip,
+                expected_edge_bps,
+                estimated_cost_bps,
+                estimated_net_edge_bps,
+                cost_gate_required_net_edge_bps,
+                cost_gate_pass,
                 entry_block_reason,
                 run_error: None,
                 unrealized_pnl,
@@ -928,6 +1017,49 @@ impl StrategyEngine {
                 }
             }
         }
+    }
+
+    fn cost_gate_decision(
+        &self,
+        direction: TradeDirection,
+        zscore: Decimal,
+        sigma_eff: Option<Decimal>,
+        capital: Decimal,
+        funding_cost_est: Option<Decimal>,
+    ) -> Option<CostGateDecision> {
+        if !self.config.cost_gate.enabled {
+            return None;
+        }
+        let sigma_eff = sigma_eff?;
+        let gross_z_edge = (zscore.abs() - self.config.strategy.tp_z).max(Decimal::ZERO);
+        let expected_edge_bps = gross_z_edge * sigma_eff * Decimal::from(10_000u32);
+        let funding_bps = if capital > Decimal::ZERO {
+            funding_cost_est.unwrap_or(Decimal::ZERO) / capital * Decimal::from(10_000u32)
+        } else {
+            Decimal::ZERO
+        };
+        let estimated_cost_bps = self.config.cost_gate.entry_fee_bps
+            + self.config.cost_gate.exit_fee_bps
+            + self.config.cost_gate.slippage_bps
+            + self.config.cost_gate.spread_bps
+            + funding_bps;
+        let estimated_net_edge_bps = expected_edge_bps - estimated_cost_bps;
+        let required_net_edge_bps = self.config.cost_gate.min_net_edge_bps
+            + match direction {
+                TradeDirection::LongEthShortBtc => {
+                    self.config.cost_gate.long_eth_short_btc_extra_bps
+                }
+                TradeDirection::ShortEthLongBtc => {
+                    self.config.cost_gate.short_eth_long_btc_extra_bps
+                }
+            };
+        Some(CostGateDecision {
+            expected_edge_bps,
+            estimated_cost_bps,
+            estimated_net_edge_bps,
+            required_net_edge_bps,
+            pass: estimated_net_edge_bps >= required_net_edge_bps,
+        })
     }
 
     fn exposure_to_position(

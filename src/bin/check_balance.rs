@@ -27,13 +27,19 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let config = load_config(args.config.as_deref()).context("load config")?;
 
-    let base_url = args.base_url.unwrap_or_else(|| config.runtime.base_url.clone());
+    let base_url = args
+        .base_url
+        .unwrap_or_else(|| config.runtime.base_url.clone());
     let private_key = args
         .private_key
         .or_else(|| config.auth.private_key.clone())
         .ok_or_else(|| anyhow!("missing Hyperliquid private key"))?;
-    let wallet_address = args.wallet_address.or_else(|| config.auth.wallet_address.clone());
-    let vault_address = args.vault_address.or_else(|| config.auth.vault_address.clone());
+    let wallet_address = args
+        .wallet_address
+        .or_else(|| config.auth.wallet_address.clone());
+    let vault_address = args
+        .vault_address
+        .or_else(|| config.auth.vault_address.clone());
 
     let signer = PrivateKeySigner::from_str(private_key.trim_start_matches("0x"))
         .map_err(|err| anyhow!("invalid private key: {err}"))?;

@@ -16,12 +16,17 @@ use alloy_signer_local::PrivateKeySigner;
 use eth_btc_strategy::account::{
     AccountBalanceSource, AccountFillSource, AccountPositionSource, HyperliquidAccountSource,
 };
+use eth_btc_strategy::analysis::{
+    analyze_trade_history_csv_since, build_trade_attribution_report,
+    default_replay_strategy_configs, format_report_text, format_stats_replay_text,
+    replay_stats_log,
+};
 use eth_btc_strategy::backtest::download::{HyperliquidDownloader, write_bars_to_output};
 use eth_btc_strategy::backtest::{
     BacktestEngine, export_equity_csv, export_metrics_json, export_trades_csv, load_backtest_bars,
     load_backtest_bars_from_db,
 };
-use eth_btc_strategy::cli::{Cli, Command};
+use eth_btc_strategy::cli::{AnalyzeOutputFormat, Cli, Command};
 use eth_btc_strategy::config::{CapitalMode, ExecutionConfig, OrderType, load_config};
 use eth_btc_strategy::core::strategy::StrategyEngine;
 use eth_btc_strategy::data::{
@@ -116,6 +121,50 @@ async fn main() -> anyhow::Result<()> {
                     .context("download bars")?;
                 write_bars_to_output(&bars, &args.output).context("write output")?;
                 info!(count = bars.len(), path = %args.output.display(), "download complete");
+                return Ok(());
+            }
+            Command::AnalyzeTrades(args) => {
+                let path = args
+                    .trade_history
+                    .clone()
+                    .unwrap_or_else(|| PathBuf::from("data/trade_history.csv"));
+                let since = args
+                    .since
+                    .as_ref()
+                    .map(|value| parse_rfc3339(value))
+                    .transpose()
+                    .context("parse --since")?;
+                let content = std::fs::read_to_string(&path)
+                    .with_context(|| format!("read trade history {}", path.display()))?;
+                let cycles = analyze_trade_history_csv_since(&content, since)
+                    .context("analyze trade history")?;
+                let report = build_trade_attribution_report(cycles);
+                let stats_replay = if let Some(stats_path) = args.stats_log.as_ref() {
+                    let stats_content = std::fs::read_to_string(stats_path)
+                        .with_context(|| format!("read stats log {}", stats_path.display()))?;
+                    Some(
+                        replay_stats_log(&stats_content, since, &default_replay_strategy_configs())
+                            .context("replay stats log")?,
+                    )
+                } else {
+                    None
+                };
+                match args.format {
+                    AnalyzeOutputFormat::Text => {
+                        print!("{}", format_report_text(&report));
+                        if let Some(stats_replay) = stats_replay.as_ref() {
+                            print!("{}", format_stats_replay_text(stats_replay));
+                        }
+                    }
+                    AnalyzeOutputFormat::Json => {
+                        let payload = serde_json::to_string_pretty(&json!({
+                            "trade_attribution": report,
+                            "stats_replay": stats_replay,
+                        }))
+                        .context("format trade analysis")?;
+                        println!("{payload}");
+                    }
+                }
                 return Ok(());
             }
             Command::OrderTest(args) => {

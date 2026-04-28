@@ -468,6 +468,173 @@ async fn strategy_engine_treats_post_only_would_take_as_blocked_entry() {
 }
 
 #[tokio::test]
+async fn strategy_engine_blocks_entry_when_cost_gate_fails() {
+    let mut config = Config::default();
+    config.strategy.n_z = 3;
+    config.position.n_vol = 1;
+    config.strategy.entry_z = dec!(0.5);
+    config.strategy.tp_z = dec!(0.1);
+    config.strategy.sl_z = dec!(10.0);
+    config.position.c_value = Some(dec!(100));
+    config.cost_gate.enabled = true;
+    config.cost_gate.enforce = true;
+    config.cost_gate.min_net_edge_bps = dec!(10000);
+    config.cost_gate.entry_fee_bps = dec!(3);
+    config.cost_gate.exit_fee_bps = dec!(4);
+    config.cost_gate.slippage_bps = dec!(1);
+    config.cost_gate.spread_bps = dec!(1);
+
+    let recorder = std::sync::Arc::new(RecordingExecutor::default());
+    let execution = ExecutionEngine::new(recorder.clone(), RetryConfig::fast());
+    let mut engine = StrategyEngine::new(config, execution).unwrap();
+
+    for offset in [0, 900, 1800] {
+        let bar = eth_btc_strategy::core::strategy::StrategyBar {
+            timestamp: Utc.timestamp_opt(offset, 0).unwrap(),
+            eth_price: dec!(100),
+            btc_price: dec!(100),
+            equity: None,
+            funding_eth: None,
+            funding_btc: None,
+            funding_interval_hours: None,
+        };
+        engine.process_bar(bar).await.unwrap();
+    }
+
+    let outcome = engine
+        .process_bar(eth_btc_strategy::core::strategy::StrategyBar {
+            timestamp: Utc.timestamp_opt(2700, 0).unwrap(),
+            eth_price: dec!(271.8281828),
+            btc_price: dec!(100),
+            equity: None,
+            funding_eth: None,
+            funding_btc: None,
+            funding_interval_hours: None,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.state, StrategyStatus::Flat);
+    assert_eq!(
+        outcome.bar_log.entry_block_reason,
+        Some(EntryBlockReason::CostGate)
+    );
+    assert_eq!(outcome.bar_log.cost_gate_pass, Some(false));
+    assert!(outcome.bar_log.expected_edge_bps.is_some());
+    assert!(outcome.bar_log.estimated_cost_bps.is_some());
+    assert!(outcome.bar_log.estimated_net_edge_bps.is_some());
+    assert!(outcome.events.is_empty());
+    assert!(outcome.trade_logs.is_empty());
+    assert!(recorder.submitted.lock().expect("submit lock").is_empty());
+}
+
+#[tokio::test]
+async fn strategy_engine_records_shadow_cost_gate_without_blocking() {
+    let mut config = Config::default();
+    config.strategy.n_z = 3;
+    config.position.n_vol = 1;
+    config.strategy.entry_z = dec!(0.5);
+    config.strategy.tp_z = dec!(0.1);
+    config.strategy.sl_z = dec!(10.0);
+    config.position.c_value = Some(dec!(100));
+    config.cost_gate.enabled = true;
+    config.cost_gate.enforce = false;
+    config.cost_gate.min_net_edge_bps = dec!(10000);
+
+    let recorder = std::sync::Arc::new(RecordingExecutor::default());
+    let execution = ExecutionEngine::new(recorder.clone(), RetryConfig::fast());
+    let mut engine = StrategyEngine::new(config, execution).unwrap();
+
+    for offset in [0, 900, 1800] {
+        let bar = eth_btc_strategy::core::strategy::StrategyBar {
+            timestamp: Utc.timestamp_opt(offset, 0).unwrap(),
+            eth_price: dec!(100),
+            btc_price: dec!(100),
+            equity: None,
+            funding_eth: None,
+            funding_btc: None,
+            funding_interval_hours: None,
+        };
+        engine.process_bar(bar).await.unwrap();
+    }
+
+    let outcome = engine
+        .process_bar(eth_btc_strategy::core::strategy::StrategyBar {
+            timestamp: Utc.timestamp_opt(2700, 0).unwrap(),
+            eth_price: dec!(271.8281828),
+            btc_price: dec!(100),
+            equity: None,
+            funding_eth: None,
+            funding_btc: None,
+            funding_interval_hours: None,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.state, StrategyStatus::InPosition);
+    assert_eq!(outcome.bar_log.cost_gate_pass, Some(false));
+    assert!(outcome.events.contains(&LogEvent::Entry));
+    assert_eq!(recorder.submitted.lock().expect("submit lock").len(), 2);
+}
+
+#[tokio::test]
+async fn strategy_engine_applies_direction_specific_cost_buffer() {
+    let mut config = Config::default();
+    config.strategy.n_z = 3;
+    config.position.n_vol = 1;
+    config.strategy.entry_z = dec!(0.5);
+    config.strategy.tp_z = dec!(0.1);
+    config.strategy.sl_z = dec!(10.0);
+    config.position.c_value = Some(dec!(100));
+    config.cost_gate.enabled = true;
+    config.cost_gate.enforce = true;
+    config.cost_gate.min_net_edge_bps = dec!(0);
+    config.cost_gate.short_eth_long_btc_extra_bps = dec!(10000);
+
+    let recorder = std::sync::Arc::new(RecordingExecutor::default());
+    let execution = ExecutionEngine::new(recorder.clone(), RetryConfig::fast());
+    let mut engine = StrategyEngine::new(config, execution).unwrap();
+
+    for offset in [0, 900, 1800] {
+        let bar = eth_btc_strategy::core::strategy::StrategyBar {
+            timestamp: Utc.timestamp_opt(offset, 0).unwrap(),
+            eth_price: dec!(100),
+            btc_price: dec!(100),
+            equity: None,
+            funding_eth: None,
+            funding_btc: None,
+            funding_interval_hours: None,
+        };
+        engine.process_bar(bar).await.unwrap();
+    }
+
+    let outcome = engine
+        .process_bar(eth_btc_strategy::core::strategy::StrategyBar {
+            timestamp: Utc.timestamp_opt(2700, 0).unwrap(),
+            eth_price: dec!(271.8281828),
+            btc_price: dec!(100),
+            equity: None,
+            funding_eth: None,
+            funding_btc: None,
+            funding_interval_hours: None,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.state, StrategyStatus::Flat);
+    assert_eq!(
+        outcome.bar_log.entry_block_reason,
+        Some(EntryBlockReason::CostGate)
+    );
+    assert_eq!(
+        outcome.bar_log.cost_gate_required_net_edge_bps,
+        Some(dec!(10000))
+    );
+    assert_eq!(outcome.bar_log.cost_gate_pass, Some(false));
+    assert!(recorder.submitted.lock().expect("submit lock").is_empty());
+}
+
+#[tokio::test]
 async fn strategy_engine_enforces_max_notional_limit() {
     let mut config = Config::default();
     config.strategy.n_z = 3;

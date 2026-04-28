@@ -22,10 +22,7 @@ fn redaction_masks_wallet_addresses_in_strings() {
 
     let redacted = redact_wallet_addresses(value);
 
-    assert_eq!(
-        redacted,
-        "User or API Wallet 0x[REDACTED] does not exist"
-    );
+    assert_eq!(redacted, "User or API Wallet 0x[REDACTED] does not exist");
 }
 
 #[test]

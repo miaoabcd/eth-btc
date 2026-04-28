@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use rust_decimal::Decimal;
 
 use crate::config::Symbol;
@@ -42,6 +42,7 @@ pub struct Cli {
 pub enum Command {
     Backtest(BacktestArgs),
     Download(DownloadArgs),
+    AnalyzeTrades(AnalyzeTradesArgs),
     OrderTest(OrderTestArgs),
     MarketTest(MarketTestArgs),
     CancelOrder(CancelOrderArgs),
@@ -69,6 +70,24 @@ pub struct DownloadArgs {
     pub end: String,
     #[arg(long, value_name = "PATH")]
     pub output: PathBuf,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum AnalyzeOutputFormat {
+    Text,
+    Json,
+}
+
+#[derive(Debug, Args)]
+pub struct AnalyzeTradesArgs {
+    #[arg(long, value_name = "PATH")]
+    pub trade_history: Option<PathBuf>,
+    #[arg(long, value_name = "PATH")]
+    pub stats_log: Option<PathBuf>,
+    #[arg(long, value_name = "RFC3339")]
+    pub since: Option<String>,
+    #[arg(long, value_enum, default_value_t = AnalyzeOutputFormat::Text)]
+    pub format: AnalyzeOutputFormat,
 }
 
 #[derive(Debug, Args)]
