@@ -17,6 +17,7 @@ ai/
 AGENTS.md
 Cargo.lock
 .tmp/
+.codex
 
 scripts/liblink_fallback.so
 
@@ -30,3 +31,4 @@ config.toml
 config.toml.local
 .cargo/
 data/
+TODO.md
