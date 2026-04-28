@@ -45,7 +45,8 @@ Key behaviors:
 Statistics log:
 
 - `[logging].stats_path` writes one record per 15m bar (r/mu/sigma/sigma_eff/zscore, weights, notional, funding fields, state, `unrealized_pnl`).
-- `[logging].trade_path` writes per-entry/per-exit records (`realized_pnl`, `cumulative_realized_pnl`).
+- `[logging].trade_path` writes per-entry/per-exit records (`realized_pnl`, `cumulative_realized_pnl`, `fee`, `exchange_closed_pnl`, `pnl_source`).
+- In live mode, trade PnL is reconciled from Hyperliquid fills by order id when available: `realized_pnl = closedPnl - fee`, matching the net fill-history/exported trade-history basis. If fills cannot be fetched or matched, the record falls back to `MODEL_ESTIMATE`.
 - If `[logging].price_db_path` points to `.sqlite`, fetched bars are persisted to SQLite (`price_bars`) and can be reused by backtest.
 - For maker entry diagnostics, stats records now distinguish "no signal" from "signal blocked" cases via `entry_block_reason`, and `trade_path` records `EntrySubmitted` before a passive order becomes a live position.
 
@@ -236,7 +237,7 @@ Config is TOML-first. Runtime environment variables are optional for process beh
 - Funding controls rely on current funding rates (no historical funding series in live loop).
 - Funding `THRESHOLD` mode is active in strategy entry gating: `effective_entry_z = entry_z + funding_threshold_k * normalized_funding_cost`.
 - Set `logging.price_db_path` to persist fetched candles into SQLite for later analysis.
-- Trade log `realized_pnl` (for new exits) deducts estimated funding cost when funding data is available.
+- Trade log `realized_pnl` uses Hyperliquid fill history in live mode when available; fallback model exits deduct estimated funding cost when funding data is available.
 - Residual-leg auto-repair: if only one leg remains, the runner attempts `repair_residual` and logs the event.
 - Passive entry workflow: with `POST_ONLY`, an order can be accepted by the exchange without an immediate fill. The strategy persists this as `PendingEntry`, confirms it on the next balance/position sync if it fills, or explicitly cancels the outstanding resting orders before returning to `Flat`.
 

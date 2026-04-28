@@ -1,14 +1,20 @@
-use chrono::{DateTime, Utc};
+use std::collections::HashSet;
+use std::sync::Arc;
+
+use chrono::{DateTime, Duration, Utc};
 use rust_decimal::Decimal;
 use thiserror::Error;
 
-use crate::account::PairExposure;
+use crate::account::{AccountFillSource, ExchangeFill, PairExposure};
 use crate::config::{CapitalMode, Config, FundingMode, OrderType, PriceField, Symbol};
 use crate::core::TradeDirection;
 use crate::core::pipeline::SignalPipeline;
-use crate::execution::{ExecutionEngine, OrderRequest, OrderSide, PairOpenOutcome};
+use crate::execution::{
+    ExecutionEngine, ExecutionError, OrderFill, OrderRequest, OrderSide, PairFill,
+    PairOpenOutcome,
+};
 use crate::funding::{FundingRate, apply_funding_controls, estimate_funding_cost};
-use crate::logging::{BarLog, EntryBlockReason, LogEvent, TradeEvent, TradeLog};
+use crate::logging::{BarLog, EntryBlockReason, LogEvent, PnlSource, TradeEvent, TradeLog};
 use crate::position::{PositionError, SizeConverter, compute_capital, risk_parity_weights};
 use crate::state::{
     PendingEntrySnapshot, PositionLeg, PositionSnapshot, StateMachine, StrategyState,
@@ -55,9 +61,20 @@ pub struct StrategyEngine {
     pipeline: SignalPipeline,
     state_machine: StateMachine,
     execution: ExecutionEngine,
+    fill_source: Option<Arc<dyn AccountFillSource>>,
     cumulative_realized_pnl: Decimal,
     pending_events: Vec<LogEvent>,
     pending_trade_logs: Vec<TradeLog>,
+}
+
+#[derive(Debug, Clone)]
+struct FillAccounting {
+    eth_price: Decimal,
+    btc_price: Decimal,
+    fee: Decimal,
+    exchange_closed_pnl: Option<Decimal>,
+    realized_pnl: Decimal,
+    source: PnlSource,
 }
 
 impl std::fmt::Debug for StrategyEngine {
@@ -79,10 +96,16 @@ impl StrategyEngine {
             state_machine: StateMachine::new(config.risk.clone()),
             config,
             execution,
+            fill_source: None,
             cumulative_realized_pnl: Decimal::ZERO,
             pending_events: Vec::new(),
             pending_trade_logs: Vec::new(),
         })
+    }
+
+    pub fn with_fill_source(mut self, source: Arc<dyn AccountFillSource>) -> Self {
+        self.fill_source = Some(source);
+        self
     }
 
     pub fn state(&self) -> &StateMachine {
@@ -90,15 +113,20 @@ impl StrategyEngine {
     }
 
     pub fn apply_state(&mut self, state: StrategyState) -> Result<(), StrategyError> {
+        let cumulative_realized_pnl = state.cumulative_realized_pnl;
         self.state_machine
             .hydrate(state)
-            .map_err(|err| StrategyError::Position(err.to_string()))
+            .map_err(|err| StrategyError::Position(err.to_string()))?;
+        self.cumulative_realized_pnl = cumulative_realized_pnl;
+        Ok(())
     }
 
     pub async fn reconcile_exchange_position(
         &mut self,
         exposure: &PairExposure,
         timestamp: DateTime<Utc>,
+        eth_price: Decimal,
+        btc_price: Decimal,
     ) -> Result<(), StrategyError> {
         let local_state = self.state_machine.state().clone();
 
@@ -120,18 +148,55 @@ impl StrategyEngine {
                 btc_qty = %position.btc.qty,
                 "exchange residual leg detected; attempting repair"
             );
-            self.execution
+            let repair_fill = self
+                .execution
                 .repair_residual(&position)
                 .await
                 .map_err(|err| StrategyError::Execution(err.to_string()))?;
+            let trade_log = self
+                .residual_repair_trade_log(
+                    &position,
+                    timestamp,
+                    eth_price,
+                    btc_price,
+                    repair_fill.as_ref(),
+                )
+                .await;
             self.state_machine.force_flat();
             self.pending_events.push(LogEvent::ResidualRepair);
+            self.pending_trade_logs.push(trade_log);
             return Ok(());
         }
 
         match local_state.status {
             StrategyStatus::PendingEntry => {
-                let position = self.exposure_to_position(exposure, timestamp)?;
+                let mut position = self.exposure_to_position(exposure, timestamp)?;
+                let pending = local_state.pending_entry.as_ref().ok_or_else(|| {
+                    StrategyError::Position(
+                        "pending-entry state missing pending snapshot".to_string(),
+                    )
+                })?;
+                let accounting = self
+                    .fill_accounting_for_order_ids(
+                        &[Some(pending.eth_order_id), Some(pending.btc_order_id)],
+                        &[Symbol::EthPerp, Symbol::BtcPerp],
+                        pending.submitted_at,
+                        timestamp,
+                        position.eth.avg_price,
+                        position.btc.avg_price,
+                        Decimal::ZERO,
+                    )
+                    .await
+                    .unwrap_or_else(|| {
+                        Self::model_accounting(
+                            position.eth.avg_price,
+                            position.btc.avg_price,
+                            Decimal::ZERO,
+                        )
+                    });
+                position.eth.avg_price = accounting.eth_price;
+                position.btc.avg_price = accounting.btc_price;
+                self.add_realized_pnl(accounting.realized_pnl);
                 self.state_machine
                     .confirm_pending_entry(position.clone())
                     .map_err(|err| StrategyError::Position(err.to_string()))?;
@@ -142,13 +207,16 @@ impl StrategyEngine {
                     direction: position.direction,
                     eth_qty: position.eth.qty,
                     btc_qty: position.btc.qty,
-                    eth_price: position.eth.avg_price,
-                    btc_price: position.btc.avg_price,
+                    eth_price: accounting.eth_price,
+                    btc_price: accounting.btc_price,
                     entry_time: timestamp,
-                    entry_eth_price: position.eth.avg_price,
-                    entry_btc_price: position.btc.avg_price,
-                    realized_pnl: Decimal::ZERO,
+                    entry_eth_price: accounting.eth_price,
+                    entry_btc_price: accounting.btc_price,
+                    realized_pnl: accounting.realized_pnl,
                     cumulative_realized_pnl: self.cumulative_realized_pnl,
+                    fee: accounting.fee,
+                    exchange_closed_pnl: accounting.exchange_closed_pnl,
+                    pnl_source: accounting.source,
                 });
                 Ok(())
             }
@@ -169,14 +237,14 @@ impl StrategyEngine {
                 }
                 Ok(())
             }
-            StrategyStatus::Flat | StrategyStatus::Cooldown => Err(StrategyError::Execution(
-                format!(
+            StrategyStatus::Flat | StrategyStatus::Cooldown => {
+                Err(StrategyError::Execution(format!(
                     "exchange position exists while local state is {:?}: remote eth_qty={} btc_qty={}",
                     local_state.status,
                     exposure.eth_qty(),
                     exposure.btc_qty(),
-                ),
-            )),
+                )))
+            }
         }
     }
 
@@ -257,12 +325,23 @@ impl StrategyEngine {
                 btc_qty = %position.btc.qty,
                 "residual leg detected; attempting repair"
             );
-            self.execution
+            let repair_fill = self
+                .execution
                 .repair_residual(&position)
                 .await
                 .map_err(|err| StrategyError::Execution(err.to_string()))?;
+            let trade_log = self
+                .residual_repair_trade_log(
+                    &position,
+                    bar.timestamp,
+                    bar.eth_price,
+                    bar.btc_price,
+                    repair_fill.as_ref(),
+                )
+                .await;
             self.state_machine.force_flat();
             events.push(LogEvent::ResidualRepair);
+            trade_logs.push(trade_log);
         }
         let output = self
             .pipeline
@@ -496,7 +575,8 @@ impl StrategyEngine {
                 btc_limit_price = %btc_limit_price,
                 "entry order attempt"
             );
-            let open_outcome = self.execution
+            let open_outcome = match self
+                .execution
                 .open_pair(
                     OrderRequest {
                         symbol: Symbol::EthPerp,
@@ -516,29 +596,69 @@ impl StrategyEngine {
                     },
                 )
                 .await
-                .map_err(|err| StrategyError::Execution(err.to_string()))?;
+            {
+                Ok(outcome) => outcome,
+                Err(err)
+                    if matches!(err, ExecutionError::Fatal(_)) && err.is_post_only_would_take() =>
+                {
+                    entry_block_reason = Some(EntryBlockReason::PostOnlyWouldTake);
+                    events.push(LogEvent::EntryCancelled);
+                    return Ok(self.build_outcome(
+                        bar,
+                        z_snapshot,
+                        vol_snapshot,
+                        events,
+                        w_eth,
+                        w_btc,
+                        notional_eth,
+                        notional_btc,
+                        funding_cost_est,
+                        funding_skip,
+                        entry_block_reason,
+                        trade_logs,
+                    ));
+                }
+                Err(err) => return Err(StrategyError::Execution(err.to_string())),
+            };
             match open_outcome {
-                PairOpenOutcome::Filled => {
+                PairOpenOutcome::Filled(pair_fill) => {
+                    let accounting = self
+                        .fill_accounting_for_pair_fill(
+                            &pair_fill,
+                            bar.timestamp,
+                            pair_fill.eth.avg_price.unwrap_or(bar.eth_price),
+                            pair_fill.btc.avg_price.unwrap_or(bar.btc_price),
+                            Decimal::ZERO,
+                        )
+                        .await
+                        .unwrap_or_else(|| {
+                            Self::model_accounting(
+                                pair_fill.eth.avg_price.unwrap_or(bar.eth_price),
+                                pair_fill.btc.avg_price.unwrap_or(bar.btc_price),
+                                Decimal::ZERO,
+                            )
+                        });
+                    self.add_realized_pnl(accounting.realized_pnl);
                     let position = PositionSnapshot {
                         direction: signal.direction,
                         entry_time: bar.timestamp,
                         eth: PositionLeg {
                             qty: if signal.direction == TradeDirection::LongEthShortBtc {
-                                eth_order.qty
+                                pair_fill.eth.qty
                             } else {
-                                -eth_order.qty
+                                -pair_fill.eth.qty
                             },
-                            avg_price: bar.eth_price,
-                            notional: notional_eth_value,
+                            avg_price: accounting.eth_price,
+                            notional: pair_fill.eth.qty.abs() * accounting.eth_price,
                         },
                         btc: PositionLeg {
                             qty: if signal.direction == TradeDirection::LongEthShortBtc {
-                                -btc_order.qty
+                                -pair_fill.btc.qty
                             } else {
-                                btc_order.qty
+                                pair_fill.btc.qty
                             },
-                            avg_price: bar.btc_price,
-                            notional: notional_btc_value,
+                            avg_price: accounting.btc_price,
+                            notional: pair_fill.btc.qty.abs() * accounting.btc_price,
                         },
                     };
                     self.state_machine
@@ -550,22 +670,25 @@ impl StrategyEngine {
                         event: TradeEvent::Entry,
                         direction: signal.direction,
                         eth_qty: if signal.direction == TradeDirection::LongEthShortBtc {
-                            eth_order.qty
+                            pair_fill.eth.qty
                         } else {
-                            -eth_order.qty
+                            -pair_fill.eth.qty
                         },
                         btc_qty: if signal.direction == TradeDirection::LongEthShortBtc {
-                            -btc_order.qty
+                            -pair_fill.btc.qty
                         } else {
-                            btc_order.qty
+                            pair_fill.btc.qty
                         },
-                        eth_price: bar.eth_price,
-                        btc_price: bar.btc_price,
+                        eth_price: accounting.eth_price,
+                        btc_price: accounting.btc_price,
                         entry_time: bar.timestamp,
-                        entry_eth_price: bar.eth_price,
-                        entry_btc_price: bar.btc_price,
-                        realized_pnl: Decimal::ZERO,
+                        entry_eth_price: accounting.eth_price,
+                        entry_btc_price: accounting.btc_price,
+                        realized_pnl: accounting.realized_pnl,
                         cumulative_realized_pnl: self.cumulative_realized_pnl,
+                        fee: accounting.fee,
+                        exchange_closed_pnl: accounting.exchange_closed_pnl,
+                        pnl_source: accounting.source,
                     });
                 }
                 PairOpenOutcome::Resting(resting) => {
@@ -630,11 +753,15 @@ impl StrategyEngine {
                 btc_limit_price = %btc_order.limit_price.unwrap_or(bar.btc_price),
                 "exit order attempt"
             );
-            self.execution
+            let pair_fill = self
+                .execution
                 .close_pair(eth_order, btc_order)
                 .await
                 .map_err(|err| StrategyError::Execution(err.to_string()))?;
-            let mut realized_pnl = compute_position_pnl(&position, bar.eth_price, bar.btc_price);
+            let close_eth_price = pair_fill.eth.avg_price.unwrap_or(bar.eth_price);
+            let close_btc_price = pair_fill.btc.avg_price.unwrap_or(bar.btc_price);
+            let mut model_realized_pnl =
+                compute_position_pnl(&position, close_eth_price, close_btc_price);
             if let (Some(funding_eth), Some(funding_btc)) = (bar.funding_eth, bar.funding_btc) {
                 let interval_hours = bar
                     .funding_interval_hours
@@ -660,22 +787,37 @@ impl StrategyEngine {
                     holding_hours,
                 )
                 .map_err(|err| StrategyError::Funding(err.to_string()))?;
-                realized_pnl -= estimate.cost_est;
+                model_realized_pnl -= estimate.cost_est;
             }
-            self.cumulative_realized_pnl += realized_pnl;
+            let accounting = self
+                .fill_accounting_for_pair_fill(
+                    &pair_fill,
+                    bar.timestamp,
+                    close_eth_price,
+                    close_btc_price,
+                    model_realized_pnl,
+                )
+                .await
+                .unwrap_or_else(|| {
+                    Self::model_accounting(close_eth_price, close_btc_price, model_realized_pnl)
+                });
+            self.add_realized_pnl(accounting.realized_pnl);
             trade_logs.push(TradeLog {
                 timestamp: bar.timestamp,
                 event: TradeEvent::Exit(exit_signal.reason),
                 direction: position.direction,
                 eth_qty: position.eth.qty,
                 btc_qty: position.btc.qty,
-                eth_price: bar.eth_price,
-                btc_price: bar.btc_price,
+                eth_price: accounting.eth_price,
+                btc_price: accounting.btc_price,
                 entry_time: position.entry_time,
                 entry_eth_price: position.eth.avg_price,
                 entry_btc_price: position.btc.avg_price,
-                realized_pnl,
+                realized_pnl: accounting.realized_pnl,
                 cumulative_realized_pnl: self.cumulative_realized_pnl,
+                fee: accounting.fee,
+                exchange_closed_pnl: accounting.exchange_closed_pnl,
+                pnl_source: accounting.source,
             });
             self.state_machine
                 .exit(exit_signal.reason, bar.timestamp)
@@ -837,8 +979,203 @@ impl StrategyEngine {
         })
     }
 
+    fn add_realized_pnl(&mut self, pnl: Decimal) {
+        self.cumulative_realized_pnl += pnl;
+        self.state_machine
+            .set_cumulative_realized_pnl(self.cumulative_realized_pnl);
+    }
+
+    fn model_accounting(
+        eth_price: Decimal,
+        btc_price: Decimal,
+        realized_pnl: Decimal,
+    ) -> FillAccounting {
+        FillAccounting {
+            eth_price,
+            btc_price,
+            fee: Decimal::ZERO,
+            exchange_closed_pnl: None,
+            realized_pnl,
+            source: PnlSource::ModelEstimate,
+        }
+    }
+
+    async fn fill_accounting_for_pair_fill(
+        &self,
+        pair_fill: &PairFill,
+        timestamp: DateTime<Utc>,
+        fallback_eth_price: Decimal,
+        fallback_btc_price: Decimal,
+        fallback_realized_pnl: Decimal,
+    ) -> Option<FillAccounting> {
+        self.fill_accounting_for_order_ids(
+            &[pair_fill.eth.oid, pair_fill.btc.oid],
+            &[Symbol::EthPerp, Symbol::BtcPerp],
+            timestamp - Duration::minutes(5),
+            timestamp,
+            fallback_eth_price,
+            fallback_btc_price,
+            fallback_realized_pnl,
+        )
+        .await
+    }
+
+    async fn fill_accounting_for_order_ids(
+        &self,
+        order_ids: &[Option<u64>],
+        expected_symbols: &[Symbol],
+        start: DateTime<Utc>,
+        end_hint: DateTime<Utc>,
+        fallback_eth_price: Decimal,
+        fallback_btc_price: Decimal,
+        _fallback_realized_pnl: Decimal,
+    ) -> Option<FillAccounting> {
+        let source = self.fill_source.as_ref()?;
+        let order_ids: HashSet<u64> = order_ids.iter().copied().flatten().collect();
+        if order_ids.is_empty() {
+            return None;
+        }
+        let end = std::cmp::max(
+            end_hint + Duration::minutes(5),
+            Utc::now() + Duration::minutes(1),
+        );
+        let fills = match source.fetch_user_fills_by_time(start, end).await {
+            Ok(fills) => fills,
+            Err(err) => {
+                warn!(error = ?err, "exchange fill fetch failed; falling back to model pnl");
+                return None;
+            }
+        };
+        let matched: Vec<ExchangeFill> = fills
+            .into_iter()
+            .filter(|fill| fill.oid.is_some_and(|oid| order_ids.contains(&oid)))
+            .collect();
+        if matched.is_empty() {
+            warn!(
+                order_ids = ?order_ids,
+                "no matching exchange fills found; falling back to model pnl"
+            );
+            return None;
+        }
+        for symbol in expected_symbols {
+            if !matched.iter().any(|fill| fill.coin == *symbol) {
+                warn!(
+                    symbol = ?symbol,
+                    order_ids = ?order_ids,
+                    "missing expected exchange fill symbol; falling back to model pnl"
+                );
+                return None;
+            }
+        }
+        Some(Self::summarize_exchange_fills(
+            &matched,
+            fallback_eth_price,
+            fallback_btc_price,
+        ))
+    }
+
+    fn summarize_exchange_fills(
+        fills: &[ExchangeFill],
+        fallback_eth_price: Decimal,
+        fallback_btc_price: Decimal,
+    ) -> FillAccounting {
+        let mut eth_px_sz = Decimal::ZERO;
+        let mut eth_sz = Decimal::ZERO;
+        let mut btc_px_sz = Decimal::ZERO;
+        let mut btc_sz = Decimal::ZERO;
+        let mut fee = Decimal::ZERO;
+        let mut closed_pnl = Decimal::ZERO;
+
+        for fill in fills {
+            fee += fill.fee;
+            closed_pnl += fill.closed_pnl;
+            match fill.coin {
+                Symbol::EthPerp => {
+                    eth_px_sz += fill.price * fill.size;
+                    eth_sz += fill.size;
+                }
+                Symbol::BtcPerp => {
+                    btc_px_sz += fill.price * fill.size;
+                    btc_sz += fill.size;
+                }
+            }
+        }
+
+        FillAccounting {
+            eth_price: if eth_sz > Decimal::ZERO {
+                eth_px_sz / eth_sz
+            } else {
+                fallback_eth_price
+            },
+            btc_price: if btc_sz > Decimal::ZERO {
+                btc_px_sz / btc_sz
+            } else {
+                fallback_btc_price
+            },
+            fee,
+            exchange_closed_pnl: Some(closed_pnl),
+            realized_pnl: closed_pnl - fee,
+            source: PnlSource::ExchangeFills,
+        }
+    }
+
     fn exposure_matches_position(exposure: &PairExposure, position: &PositionSnapshot) -> bool {
         exposure.eth_qty() == position.eth.qty && exposure.btc_qty() == position.btc.qty
+    }
+
+    async fn residual_repair_trade_log(
+        &mut self,
+        position: &PositionSnapshot,
+        timestamp: DateTime<Utc>,
+        eth_price: Decimal,
+        btc_price: Decimal,
+        repair_fill: Option<&(Symbol, OrderFill)>,
+    ) -> TradeLog {
+        let fallback_eth_price = match repair_fill {
+            Some((Symbol::EthPerp, fill)) => fill.avg_price.unwrap_or(eth_price),
+            _ => eth_price,
+        };
+        let fallback_btc_price = match repair_fill {
+            Some((Symbol::BtcPerp, fill)) => fill.avg_price.unwrap_or(btc_price),
+            _ => btc_price,
+        };
+        let model_realized_pnl =
+            compute_position_pnl(position, fallback_eth_price, fallback_btc_price);
+        let accounting = if let Some((symbol, fill)) = repair_fill {
+            self.fill_accounting_for_order_ids(
+                &[fill.oid],
+                &[*symbol],
+                timestamp - Duration::minutes(5),
+                timestamp,
+                fallback_eth_price,
+                fallback_btc_price,
+                model_realized_pnl,
+            )
+            .await
+            .unwrap_or_else(|| {
+                Self::model_accounting(fallback_eth_price, fallback_btc_price, model_realized_pnl)
+            })
+        } else {
+            Self::model_accounting(fallback_eth_price, fallback_btc_price, model_realized_pnl)
+        };
+        self.add_realized_pnl(accounting.realized_pnl);
+        TradeLog {
+            timestamp,
+            event: TradeEvent::ResidualRepair,
+            direction: position.direction,
+            eth_qty: position.eth.qty,
+            btc_qty: position.btc.qty,
+            eth_price: accounting.eth_price,
+            btc_price: accounting.btc_price,
+            entry_time: position.entry_time,
+            entry_eth_price: position.eth.avg_price,
+            entry_btc_price: position.btc.avg_price,
+            realized_pnl: accounting.realized_pnl,
+            cumulative_realized_pnl: self.cumulative_realized_pnl,
+            fee: accounting.fee,
+            exchange_closed_pnl: accounting.exchange_closed_pnl,
+            pnl_source: accounting.source,
+        }
     }
 }
 

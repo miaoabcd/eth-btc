@@ -86,6 +86,7 @@ fn state_machine_hydrate_restores_state() {
         position: Some(position.clone()),
         pending_entry: None,
         cooldown_until: None,
+        cumulative_realized_pnl: dec!(0),
     };
 
     machine.hydrate(state).unwrap();

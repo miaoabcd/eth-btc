@@ -153,6 +153,33 @@ async fn live_executor_posts_order_payload() {
 }
 
 #[tokio::test]
+async fn live_executor_preserves_fill_price_and_order_id() {
+    let client = std::sync::Arc::new(MockOrderHttpClient::default());
+    client.push_response(OrderHttpResponse {
+        status: 200,
+        body: r#"{"universe":[{"name":"ETH","szDecimals":3},{"name":"BTC","szDecimals":3}]}"#
+            .to_string(),
+    });
+    client.push_response(OrderHttpResponse {
+        status: 200,
+        body: r#"{"status":"ok","response":{"type":"order","data":{"statuses":[{"filled":{"totalSz":"1.25","avgPx":"2000.5","oid":123}}]}}}"#
+            .to_string(),
+    });
+
+    let executor = signed_executor(client);
+    let result = executor.submit_result(&order()).await.unwrap();
+
+    match result {
+        OrderSubmitResult::Filled(fill) => {
+            assert_eq!(fill.qty, dec!(1.25));
+            assert_eq!(fill.avg_price, Some(dec!(2000.5)));
+            assert_eq!(fill.oid, Some(123));
+        }
+        other => panic!("unexpected order result {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn live_executor_posts_post_only_order_with_expiry_and_resting_oid() {
     let client = std::sync::Arc::new(MockOrderHttpClient::default());
     client.push_response(OrderHttpResponse {

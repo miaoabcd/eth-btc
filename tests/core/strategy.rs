@@ -1,19 +1,17 @@
 use chrono::{TimeZone, Utc};
 use rust_decimal_macros::dec;
 
-use eth_btc_strategy::account::{ExchangePosition, PairExposure};
+use eth_btc_strategy::account::{AccountFillSource, ExchangeFill, ExchangePosition, PairExposure};
 use eth_btc_strategy::config::{CapitalMode, Config, FundingMode, OrderType, Symbol};
 use eth_btc_strategy::core::TradeDirection;
 use eth_btc_strategy::core::strategy::StrategyEngine;
 use eth_btc_strategy::execution::{
-    ExecutionEngine, OrderExecutor, OrderRequest, OrderSubmitResult, PaperOrderExecutor,
-    RetryConfig,
+    ExecutionEngine, ExecutionError, OrderExecutor, OrderFill, OrderRequest, OrderSubmitResult,
+    PaperOrderExecutor, RetryConfig,
 };
 use eth_btc_strategy::funding::{FundingRate, estimate_funding_cost};
-use eth_btc_strategy::logging::{EntryBlockReason, LogEvent, TradeEvent, TradeLog};
-use eth_btc_strategy::state::{
-    PositionLeg, PositionSnapshot, StrategyState, StrategyStatus,
-};
+use eth_btc_strategy::logging::{EntryBlockReason, LogEvent, PnlSource, TradeEvent, TradeLog};
+use eth_btc_strategy::state::{PositionLeg, PositionSnapshot, StrategyState, StrategyStatus};
 
 #[derive(Default)]
 struct RecordingExecutor {
@@ -82,7 +80,11 @@ impl OrderExecutor for RestingEntryExecutor {
             .lock()
             .expect("submit lock")
             .push(order.clone());
-        let oid = if order.symbol == Symbol::EthPerp { 11 } else { 22 };
+        let oid = if order.symbol == Symbol::EthPerp {
+            11
+        } else {
+            22
+        };
         Ok(OrderSubmitResult::Resting { oid })
     }
 }
@@ -90,6 +92,16 @@ impl OrderExecutor for RestingEntryExecutor {
 #[derive(Default)]
 struct CancelTrackingExecutor {
     cancelled: std::sync::Mutex<Vec<(Symbol, u64)>>,
+}
+
+#[derive(Default)]
+struct PostOnlyWouldTakeExecutor;
+
+struct DetailedFillExecutor;
+
+#[derive(Clone)]
+struct StaticFillSource {
+    fills: std::sync::Arc<Vec<ExchangeFill>>,
 }
 
 #[async_trait::async_trait]
@@ -121,6 +133,80 @@ impl OrderExecutor for CancelTrackingExecutor {
     }
 }
 
+#[async_trait::async_trait]
+impl OrderExecutor for PostOnlyWouldTakeExecutor {
+    async fn submit(&self, _order: &OrderRequest) -> Result<rust_decimal::Decimal, ExecutionError> {
+        Err(ExecutionError::Fatal(
+            "Post only order would have immediately matched".to_string(),
+        ))
+    }
+
+    async fn close(&self, _order: &OrderRequest) -> Result<rust_decimal::Decimal, ExecutionError> {
+        Ok(dec!(0))
+    }
+
+    async fn submit_result(
+        &self,
+        _order: &OrderRequest,
+    ) -> Result<OrderSubmitResult, ExecutionError> {
+        Err(ExecutionError::Fatal(
+            "Post only order would have immediately matched".to_string(),
+        ))
+    }
+}
+
+#[async_trait::async_trait]
+impl OrderExecutor for DetailedFillExecutor {
+    async fn submit(&self, order: &OrderRequest) -> Result<rust_decimal::Decimal, ExecutionError> {
+        Ok(order.qty)
+    }
+
+    async fn close(&self, order: &OrderRequest) -> Result<rust_decimal::Decimal, ExecutionError> {
+        Ok(order.qty)
+    }
+
+    async fn submit_result(
+        &self,
+        order: &OrderRequest,
+    ) -> Result<OrderSubmitResult, ExecutionError> {
+        let (avg_price, oid) = match order.symbol {
+            Symbol::EthPerp => (dec!(101), 1001),
+            Symbol::BtcPerp => (dec!(99), 1002),
+        };
+        Ok(OrderSubmitResult::Filled(OrderFill {
+            qty: order.qty,
+            avg_price: Some(avg_price),
+            oid: Some(oid),
+        }))
+    }
+
+    async fn close_result(
+        &self,
+        order: &OrderRequest,
+    ) -> Result<OrderSubmitResult, ExecutionError> {
+        let (avg_price, oid) = match order.symbol {
+            Symbol::EthPerp => (dec!(110), 2001),
+            Symbol::BtcPerp => (dec!(90), 2002),
+        };
+        Ok(OrderSubmitResult::Filled(OrderFill {
+            qty: order.qty,
+            avg_price: Some(avg_price),
+            oid: Some(oid),
+        }))
+    }
+}
+
+#[async_trait::async_trait]
+impl AccountFillSource for StaticFillSource {
+    async fn fetch_user_fills_by_time(
+        &self,
+        _start: chrono::DateTime<Utc>,
+        _end: chrono::DateTime<Utc>,
+    ) -> Result<Vec<ExchangeFill>, eth_btc_strategy::account::AccountError> {
+        Ok((*self.fills).clone())
+    }
+}
+
 #[test]
 fn strategy_engine_applies_state() {
     let config = Config::default();
@@ -148,6 +234,7 @@ fn strategy_engine_applies_state() {
         position: Some(position),
         pending_entry: None,
         cooldown_until: None,
+        cumulative_realized_pnl: dec!(0),
     };
 
     engine.apply_state(state).unwrap();
@@ -301,6 +388,7 @@ async fn strategy_engine_repairs_residual_leg_and_flats_state() {
         position: Some(position),
         pending_entry: None,
         cooldown_until: None,
+        cumulative_realized_pnl: dec!(0),
     };
     engine.apply_state(state).unwrap();
 
@@ -316,11 +404,67 @@ async fn strategy_engine_repairs_residual_leg_and_flats_state() {
 
     let outcome = engine.process_bar(bar).await.unwrap();
     assert!(outcome.events.contains(&LogEvent::ResidualRepair));
+    assert_eq!(outcome.trade_logs.len(), 1);
+    assert!(matches!(
+        outcome.trade_logs[0].event,
+        TradeEvent::ResidualRepair
+    ));
     assert_eq!(engine.state().state().status, StrategyStatus::Flat);
 
     let submitted = executor.submitted.lock().unwrap();
     assert_eq!(submitted.len(), 1);
     assert_eq!(submitted[0].symbol, Symbol::BtcPerp);
+}
+
+#[tokio::test]
+async fn strategy_engine_treats_post_only_would_take_as_blocked_entry() {
+    let mut config = Config::default();
+    config.strategy.n_z = 3;
+    config.position.n_vol = 1;
+    config.strategy.entry_z = dec!(0.5);
+    config.strategy.sl_z = dec!(2.0);
+    config.position.c_value = Some(dec!(100));
+    config.execution.order_type = OrderType::PostOnly;
+
+    let execution = ExecutionEngine::new(
+        std::sync::Arc::new(PostOnlyWouldTakeExecutor),
+        RetryConfig::fast(),
+    );
+    let mut engine = StrategyEngine::new(config, execution).unwrap();
+
+    for offset in [0, 900, 1800] {
+        let bar = eth_btc_strategy::core::strategy::StrategyBar {
+            timestamp: Utc.timestamp_opt(offset, 0).unwrap(),
+            eth_price: dec!(100),
+            btc_price: dec!(100),
+            equity: None,
+            funding_eth: None,
+            funding_btc: None,
+            funding_interval_hours: None,
+        };
+        engine.process_bar(bar).await.unwrap();
+    }
+
+    let outcome = engine
+        .process_bar(eth_btc_strategy::core::strategy::StrategyBar {
+            timestamp: Utc.timestamp_opt(2700, 0).unwrap(),
+            eth_price: dec!(271.8281828),
+            btc_price: dec!(100),
+            equity: None,
+            funding_eth: None,
+            funding_btc: None,
+            funding_interval_hours: None,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.state, StrategyStatus::Flat);
+    assert_eq!(
+        outcome.bar_log.entry_block_reason,
+        Some(EntryBlockReason::PostOnlyWouldTake)
+    );
+    assert!(outcome.events.contains(&LogEvent::EntryCancelled));
+    assert!(outcome.trade_logs.is_empty());
 }
 
 #[tokio::test]
@@ -482,7 +626,12 @@ async fn strategy_engine_post_only_entry_waits_for_exchange_fill() {
         }),
     };
     engine
-        .reconcile_exchange_position(&exposure, Utc.timestamp_opt(3600, 0).unwrap())
+        .reconcile_exchange_position(
+            &exposure,
+            Utc.timestamp_opt(3600, 0).unwrap(),
+            dec!(271.7),
+            dec!(100.1),
+        )
         .await
         .unwrap();
 
@@ -538,6 +687,7 @@ async fn strategy_engine_forces_market_exit_when_post_only_is_configured() {
         }),
         pending_entry: None,
         cooldown_until: None,
+        cumulative_realized_pnl: dec!(0),
     };
     engine.apply_state(state).unwrap();
 
@@ -566,7 +716,11 @@ async fn strategy_engine_forces_market_exit_when_post_only_is_configured() {
     let _ = engine.process_bar(exit_bar).await.unwrap();
 
     let submitted = recorder.submitted.lock().expect("submit lock");
-    assert!(submitted.iter().all(|order| order.order_type == OrderType::Market));
+    assert!(
+        submitted
+            .iter()
+            .all(|order| order.order_type == OrderType::Market)
+    );
 }
 
 #[tokio::test]
@@ -592,6 +746,7 @@ async fn strategy_engine_cancels_expired_pending_entry_before_flattening() {
                 expires_at: Utc.timestamp_opt(200, 0).unwrap(),
             }),
             cooldown_until: None,
+            cumulative_realized_pnl: dec!(0),
         })
         .unwrap();
 
@@ -609,7 +764,10 @@ async fn strategy_engine_cancels_expired_pending_entry_before_flattening() {
         .unwrap();
 
     let cancelled = executor.cancelled.lock().expect("cancel lock").clone();
-    assert_eq!(cancelled, vec![(Symbol::EthPerp, 11), (Symbol::BtcPerp, 22)]);
+    assert_eq!(
+        cancelled,
+        vec![(Symbol::EthPerp, 11), (Symbol::BtcPerp, 22)]
+    );
     assert_eq!(outcome.state, StrategyStatus::Flat);
     assert!(outcome.events.contains(&LogEvent::EntryCancelled));
 }
@@ -691,6 +849,134 @@ async fn strategy_engine_emits_trade_logs_on_entry_and_exit() {
         }
         other => panic!("unexpected exit trade log {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn strategy_engine_uses_exchange_fills_for_trade_log_pnl() {
+    let mut config = Config::default();
+    config.strategy.n_z = 3;
+    config.position.n_vol = 1;
+    config.strategy.entry_z = dec!(0.5);
+    config.strategy.tp_z = dec!(0.45);
+    config.strategy.sl_z = dec!(2.0);
+    config.position.c_value = Some(dec!(100));
+
+    let execution = ExecutionEngine::new(
+        std::sync::Arc::new(DetailedFillExecutor),
+        RetryConfig::fast(),
+    );
+    let fill_source = StaticFillSource {
+        fills: std::sync::Arc::new(vec![
+            ExchangeFill {
+                coin: Symbol::EthPerp,
+                price: dec!(101),
+                size: dec!(1),
+                fee: dec!(0.01),
+                closed_pnl: dec!(0),
+                timestamp: Utc.timestamp_millis_opt(3_000_000).unwrap(),
+                oid: Some(1001),
+                tid: Some(1),
+            },
+            ExchangeFill {
+                coin: Symbol::BtcPerp,
+                price: dec!(99),
+                size: dec!(1),
+                fee: dec!(0.02),
+                closed_pnl: dec!(0),
+                timestamp: Utc.timestamp_millis_opt(3_000_001).unwrap(),
+                oid: Some(1002),
+                tid: Some(2),
+            },
+            ExchangeFill {
+                coin: Symbol::EthPerp,
+                price: dec!(110),
+                size: dec!(1),
+                fee: dec!(0.03),
+                closed_pnl: dec!(9),
+                timestamp: Utc.timestamp_millis_opt(4_000_000).unwrap(),
+                oid: Some(2001),
+                tid: Some(3),
+            },
+            ExchangeFill {
+                coin: Symbol::BtcPerp,
+                price: dec!(90),
+                size: dec!(1),
+                fee: dec!(0.04),
+                closed_pnl: dec!(9),
+                timestamp: Utc.timestamp_millis_opt(4_000_001).unwrap(),
+                oid: Some(2002),
+                tid: Some(4),
+            },
+        ]),
+    };
+    let mut engine = StrategyEngine::new(config.clone(), execution)
+        .unwrap()
+        .with_fill_source(std::sync::Arc::new(fill_source));
+
+    for offset in [0, 900, 1800] {
+        let bar = eth_btc_strategy::core::strategy::StrategyBar {
+            timestamp: Utc.timestamp_opt(offset, 0).unwrap(),
+            eth_price: dec!(100),
+            btc_price: dec!(100),
+            equity: None,
+            funding_eth: None,
+            funding_btc: None,
+            funding_interval_hours: None,
+        };
+        engine.process_bar(bar).await.unwrap();
+    }
+
+    let entry_outcome = engine
+        .process_bar(eth_btc_strategy::core::strategy::StrategyBar {
+            timestamp: Utc.timestamp_opt(2700, 0).unwrap(),
+            eth_price: dec!(271.8281828),
+            btc_price: dec!(100),
+            equity: None,
+            funding_eth: None,
+            funding_btc: None,
+            funding_interval_hours: None,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(entry_outcome.trade_logs.len(), 1);
+    let entry_log = &entry_outcome.trade_logs[0];
+    assert_eq!(entry_log.event, TradeEvent::Entry);
+    assert_eq!(entry_log.pnl_source, PnlSource::ExchangeFills);
+    assert_eq!(entry_log.eth_price, dec!(101));
+    assert_eq!(entry_log.btc_price, dec!(99));
+    assert_eq!(entry_log.fee, dec!(0.03));
+    assert_eq!(entry_log.exchange_closed_pnl, Some(dec!(0)));
+    assert_eq!(entry_log.realized_pnl, dec!(-0.03));
+    assert_eq!(entry_log.cumulative_realized_pnl, dec!(-0.03));
+    let position = engine.state().state().position.as_ref().unwrap();
+    assert_eq!(position.eth.avg_price, dec!(101));
+    assert_eq!(position.btc.avg_price, dec!(99));
+
+    let exit_outcome = engine
+        .process_bar(eth_btc_strategy::core::strategy::StrategyBar {
+            timestamp: Utc.timestamp_opt(3600, 0).unwrap(),
+            eth_price: dec!(164.872127),
+            btc_price: dec!(100),
+            equity: None,
+            funding_eth: None,
+            funding_btc: None,
+            funding_interval_hours: None,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(exit_outcome.trade_logs.len(), 1);
+    let exit_log = &exit_outcome.trade_logs[0];
+    assert!(matches!(exit_log.event, TradeEvent::Exit(_)));
+    assert_eq!(exit_log.pnl_source, PnlSource::ExchangeFills);
+    assert_eq!(exit_log.eth_price, dec!(110));
+    assert_eq!(exit_log.btc_price, dec!(90));
+    assert_eq!(exit_log.fee, dec!(0.07));
+    assert_eq!(exit_log.exchange_closed_pnl, Some(dec!(18)));
+    assert_eq!(exit_log.realized_pnl, dec!(17.93));
+    assert_eq!(exit_log.cumulative_realized_pnl, dec!(17.90));
+    assert_eq!(engine.state().state().cumulative_realized_pnl, dec!(17.90));
 }
 
 #[tokio::test]

@@ -4,11 +4,11 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use async_trait::async_trait;
 use alloy_primitives::{Address, B256, keccak256};
 use alloy_signer::SignerSync;
 use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_types::{SolStruct, eip712_domain};
+use async_trait::async_trait;
 use rust_decimal::Decimal;
 use rust_decimal::RoundingStrategy;
 use serde::{Deserialize, Serialize};
@@ -68,16 +68,33 @@ pub struct OrderHttpResponse {
     pub body: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrderFill {
+    pub qty: Decimal,
+    pub avg_price: Option<Decimal>,
+    pub oid: Option<u64>,
+}
+
+impl OrderFill {
+    pub fn new(qty: Decimal) -> Self {
+        Self {
+            qty,
+            avg_price: None,
+            oid: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum OrderSubmitResult {
-    Filled(Decimal),
+    Filled(OrderFill),
     Resting { oid: u64 },
 }
 
 impl OrderSubmitResult {
-    fn expect_filled(self) -> Result<Decimal, ExecutionError> {
+    fn expect_filled(self) -> Result<OrderFill, ExecutionError> {
         match self {
-            Self::Filled(qty) => Ok(qty),
+            Self::Filled(fill) => Ok(fill),
             Self::Resting { .. } => Err(ExecutionError::Fatal("order resting on book".to_string())),
         }
     }
@@ -130,6 +147,12 @@ impl ExecutionError {
     fn is_transient(&self) -> bool {
         matches!(self, ExecutionError::Transient(_))
     }
+
+    pub fn is_post_only_would_take(&self) -> bool {
+        self.to_string()
+            .to_lowercase()
+            .contains("post only order would have immediately matched")
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -167,14 +190,20 @@ pub trait OrderExecutor: Send + Sync {
         &self,
         order: &OrderRequest,
     ) -> Result<OrderSubmitResult, ExecutionError> {
-        self.submit(order).await.map(OrderSubmitResult::Filled)
+        self.submit(order)
+            .await
+            .map(OrderFill::new)
+            .map(OrderSubmitResult::Filled)
     }
 
     async fn close_result(
         &self,
         order: &OrderRequest,
     ) -> Result<OrderSubmitResult, ExecutionError> {
-        self.close(order).await.map(OrderSubmitResult::Filled)
+        self.close(order)
+            .await
+            .map(OrderFill::new)
+            .map(OrderSubmitResult::Filled)
     }
 }
 
@@ -429,9 +458,13 @@ impl HyperliquidExecOrderResponseData {
             .next()
             .ok_or_else(|| ExecutionError::Fatal("empty order status".to_string()))?;
         match status {
-            HyperliquidExecOrderStatus::Filled { filled } => Ok(OrderSubmitResult::Filled(
-                filled.total_sz,
-            )),
+            HyperliquidExecOrderStatus::Filled { filled } => {
+                Ok(OrderSubmitResult::Filled(OrderFill {
+                    qty: filled.total_sz,
+                    avg_price: filled.avg_px,
+                    oid: filled.oid,
+                }))
+            }
             HyperliquidExecOrderStatus::Error { error } => Err(ExecutionError::Fatal(error)),
             HyperliquidExecOrderStatus::Resting { resting } => {
                 Ok(OrderSubmitResult::Resting { oid: resting.oid })
@@ -449,7 +482,10 @@ impl HyperliquidExecCancelResponseData {
             .ok_or_else(|| ExecutionError::Fatal("empty cancel status".to_string()))?;
         match status {
             Value::String(value) if value == "success" => Ok(()),
-            Value::Object(mut value) => match value.remove("error").and_then(|v| v.as_str().map(str::to_string)) {
+            Value::Object(mut value) => match value
+                .remove("error")
+                .and_then(|v| v.as_str().map(str::to_string))
+            {
                 Some(error) => Err(ExecutionError::Fatal(error)),
                 None => Err(ExecutionError::Fatal(format!(
                     "unexpected cancel status: {}",
@@ -466,21 +502,18 @@ impl HyperliquidExecCancelResponseData {
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum HyperliquidExecOrderStatus {
-    Filled {
-        filled: HyperliquidFilledInfo,
-    },
-    Resting {
-        resting: HyperliquidRestingInfo,
-    },
-    Error {
-        error: String,
-    },
+    Filled { filled: HyperliquidFilledInfo },
+    Resting { resting: HyperliquidRestingInfo },
+    Error { error: String },
 }
 
 #[derive(Debug, Deserialize)]
 struct HyperliquidFilledInfo {
     #[serde(rename = "totalSz")]
     total_sz: Decimal,
+    #[serde(rename = "avgPx")]
+    avg_px: Option<Decimal>,
+    oid: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -784,9 +817,7 @@ impl LiveOrderExecutor {
         order: &OrderRequest,
         reduce_only: bool,
     ) -> Result<OrderSubmitResult, ExecutionError> {
-        if !reduce_only
-            && let Some(leverage) = self.leverage
-        {
+        if !reduce_only && let Some(leverage) = self.leverage {
             self.update_leverage(order.symbol, leverage, self.is_cross)
                 .await?;
         }
@@ -908,11 +939,17 @@ impl LiveOrderExecutor {
 #[async_trait]
 impl OrderExecutor for LiveOrderExecutor {
     async fn submit(&self, order: &OrderRequest) -> Result<Decimal, ExecutionError> {
-        self.submit_result(order).await?.expect_filled()
+        self.submit_result(order)
+            .await?
+            .expect_filled()
+            .map(|fill| fill.qty)
     }
 
     async fn close(&self, order: &OrderRequest) -> Result<Decimal, ExecutionError> {
-        self.close_result(order).await?.expect_filled()
+        self.close_result(order)
+            .await?
+            .expect_filled()
+            .map(|fill| fill.qty)
     }
 
     async fn submit_result(
@@ -991,8 +1028,14 @@ pub struct RestingPairOrders {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PairFill {
+    pub eth: OrderFill,
+    pub btc: OrderFill,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PairOpenOutcome {
-    Filled,
+    Filled(PairFill),
     Resting(RestingPairOrders),
 }
 
@@ -1010,13 +1053,16 @@ impl ExecutionEngine {
         match eth_result {
             OrderSubmitResult::Filled(eth_fill) => match self.retry_submit_result(&btc_order).await
             {
-                Ok(OrderSubmitResult::Filled(_)) => Ok(PairOpenOutcome::Filled),
+                Ok(OrderSubmitResult::Filled(btc_fill)) => Ok(PairOpenOutcome::Filled(PairFill {
+                    eth: eth_fill,
+                    btc: btc_fill,
+                })),
                 Ok(OrderSubmitResult::Resting { .. }) => {
                     let rollback = self
                         .retry_close(&OrderRequest {
                             symbol: eth_order.symbol,
-                            side: OrderSide::close_for_qty(eth_fill),
-                            qty: eth_fill.abs(),
+                            side: OrderSide::close_for_qty(eth_fill.qty),
+                            qty: eth_fill.qty.abs(),
                             order_type: OrderType::Market,
                             limit_price: eth_order.limit_price,
                             expires_after: None,
@@ -1036,8 +1082,8 @@ impl ExecutionEngine {
                     let rollback = self
                         .retry_close(&OrderRequest {
                             symbol: eth_order.symbol,
-                            side: OrderSide::close_for_qty(eth_fill),
-                            qty: eth_fill.abs(),
+                            side: OrderSide::close_for_qty(eth_fill.qty),
+                            qty: eth_fill.qty.abs(),
                             order_type: OrderType::Market,
                             limit_price: eth_order.limit_price,
                             expires_after: None,
@@ -1056,14 +1102,17 @@ impl ExecutionEngine {
             OrderSubmitResult::Resting { oid: eth_oid } => {
                 match self.retry_submit_result(&btc_order).await {
                     Ok(OrderSubmitResult::Resting { oid: btc_oid }) => {
-                        Ok(PairOpenOutcome::Resting(RestingPairOrders { eth_oid, btc_oid }))
+                        Ok(PairOpenOutcome::Resting(RestingPairOrders {
+                            eth_oid,
+                            btc_oid,
+                        }))
                     }
                     Ok(OrderSubmitResult::Filled(btc_fill)) => {
                         let rollback = self
                             .retry_close(&OrderRequest {
                                 symbol: btc_order.symbol,
-                                side: OrderSide::close_for_qty(btc_fill),
-                                qty: btc_fill.abs(),
+                                side: OrderSide::close_for_qty(btc_fill.qty),
+                                qty: btc_fill.qty.abs(),
                                 order_type: OrderType::Market,
                                 limit_price: btc_order.limit_price,
                                 expires_after: None,
@@ -1079,9 +1128,17 @@ impl ExecutionEngine {
                             ))),
                         }
                     }
-                    Err(err) => Err(ExecutionError::Fatal(format!(
-                        "open second leg failed while first leg is resting until expiry: {err}"
-                    ))),
+                    Err(err) => {
+                        let cancel = self.retry_cancel(eth_order.symbol, eth_oid).await;
+                        match cancel {
+                            Ok(()) => Err(ExecutionError::Fatal(format!(
+                                "open second leg failed while first leg was resting; first leg cancelled: {err}"
+                            ))),
+                            Err(cancel_err) => Err(ExecutionError::PartialFill(format!(
+                                "open second leg failed while first leg was resting; first leg cancel failed: {cancel_err}; original error: {err}"
+                            ))),
+                        }
+                    }
                 }
             }
         }
@@ -1091,35 +1148,43 @@ impl ExecutionEngine {
         &self,
         eth_order: OrderRequest,
         btc_order: OrderRequest,
-    ) -> Result<(), ExecutionError> {
+    ) -> Result<PairFill, ExecutionError> {
         let eth_fill = match self.retry_close(&eth_order).await {
             Ok(fill) => fill,
             Err(err) => return Err(err),
         };
-        let btc_result = self.retry_close(&btc_order).await;
-        if let Err(err) = btc_result {
-            let rollback_order = OrderRequest {
-                symbol: eth_order.symbol,
-                side: OrderSide::close_for_qty(eth_fill),
-                qty: eth_fill.abs(),
-                order_type: eth_order.order_type,
-                limit_price: eth_order.limit_price,
-                expires_after: None,
-            };
-            let rollback = self.retry_submit(&rollback_order).await;
-            return match rollback {
-                Ok(_) => Err(ExecutionError::PartialFill(format!(
-                    "close second leg failed: {err}; rollback executed"
-                ))),
-                Err(rollback_err) => Err(ExecutionError::PartialFill(format!(
-                    "close second leg failed: {err}; rollback failed: {rollback_err}"
-                ))),
-            };
-        }
-        Ok(())
+        let btc_fill = match self.retry_close(&btc_order).await {
+            Ok(fill) => fill,
+            Err(err) => {
+                let rollback_order = OrderRequest {
+                    symbol: eth_order.symbol,
+                    side: OrderSide::close_for_qty(eth_fill.qty),
+                    qty: eth_fill.qty.abs(),
+                    order_type: eth_order.order_type,
+                    limit_price: eth_order.limit_price,
+                    expires_after: None,
+                };
+                let rollback = self.retry_submit(&rollback_order).await;
+                return match rollback {
+                    Ok(_) => Err(ExecutionError::PartialFill(format!(
+                        "close second leg failed: {err}; rollback executed"
+                    ))),
+                    Err(rollback_err) => Err(ExecutionError::PartialFill(format!(
+                        "close second leg failed: {err}; rollback failed: {rollback_err}"
+                    ))),
+                };
+            }
+        };
+        Ok(PairFill {
+            eth: eth_fill,
+            btc: btc_fill,
+        })
     }
 
-    pub async fn repair_residual(&self, position: &PositionSnapshot) -> Result<(), ExecutionError> {
+    pub async fn repair_residual(
+        &self,
+        position: &PositionSnapshot,
+    ) -> Result<Option<(Symbol, OrderFill)>, ExecutionError> {
         if position.eth.qty != Decimal::ZERO && position.btc.qty == Decimal::ZERO {
             let order = OrderRequest {
                 symbol: Symbol::EthPerp,
@@ -1129,7 +1194,10 @@ impl ExecutionEngine {
                 limit_price: Some(position.eth.avg_price),
                 expires_after: None,
             };
-            return self.retry_close(&order).await.map(|_| ());
+            return self
+                .retry_close(&order)
+                .await
+                .map(|fill| Some((Symbol::EthPerp, fill)));
         }
         if position.btc.qty != Decimal::ZERO && position.eth.qty == Decimal::ZERO {
             let order = OrderRequest {
@@ -1140,20 +1208,20 @@ impl ExecutionEngine {
                 limit_price: Some(position.btc.avg_price),
                 expires_after: None,
             };
-            return self.retry_close(&order).await.map(|_| ());
+            return self
+                .retry_close(&order)
+                .await
+                .map(|fill| Some((Symbol::BtcPerp, fill)));
         }
-        Ok(())
+        Ok(None)
     }
 
     pub async fn cancel_order(&self, symbol: Symbol, oid: u64) -> Result<(), ExecutionError> {
         self.retry_cancel(symbol, oid).await
     }
 
-    async fn retry_submit(&self, order: &OrderRequest) -> Result<Decimal, ExecutionError> {
-        if matches!(order.order_type, OrderType::Market) {
-            return self.retry_market_with_requote(order, false).await;
-        }
-        self.retry_with(|| self.executor.submit(order)).await
+    async fn retry_submit(&self, order: &OrderRequest) -> Result<OrderFill, ExecutionError> {
+        self.retry_submit_result(order).await?.expect_filled()
     }
 
     async fn retry_submit_result(
@@ -1161,19 +1229,23 @@ impl ExecutionEngine {
         order: &OrderRequest,
     ) -> Result<OrderSubmitResult, ExecutionError> {
         if matches!(order.order_type, OrderType::Market) {
-            return self
-                .retry_market_with_requote(order, false)
-                .await
-                .map(OrderSubmitResult::Filled);
+            return self.retry_market_with_requote(order, false).await;
         }
         self.retry_with(|| self.executor.submit_result(order)).await
     }
 
-    async fn retry_close(&self, order: &OrderRequest) -> Result<Decimal, ExecutionError> {
+    async fn retry_close(&self, order: &OrderRequest) -> Result<OrderFill, ExecutionError> {
+        self.retry_close_result(order).await?.expect_filled()
+    }
+
+    async fn retry_close_result(
+        &self,
+        order: &OrderRequest,
+    ) -> Result<OrderSubmitResult, ExecutionError> {
         if matches!(order.order_type, OrderType::Market) {
             return self.retry_market_with_requote(order, true).await;
         }
-        self.retry_with(|| self.executor.close(order)).await
+        self.retry_with(|| self.executor.close_result(order)).await
     }
 
     async fn retry_cancel(&self, symbol: Symbol, oid: u64) -> Result<(), ExecutionError> {
@@ -1219,7 +1291,7 @@ impl ExecutionEngine {
         &self,
         order: &OrderRequest,
         reduce_only: bool,
-    ) -> Result<Decimal, ExecutionError> {
+    ) -> Result<OrderSubmitResult, ExecutionError> {
         let base_price = order.limit_price.ok_or_else(|| {
             ExecutionError::Fatal("limit_price required for market order".to_string())
         })?;
@@ -1228,15 +1300,28 @@ impl ExecutionEngine {
 
         for attempt in 0..attempts {
             let mut adjusted = order.clone();
-            adjusted.limit_price =
-                Some(Self::requoted_market_price(base_price, adjusted.side, attempt)?);
+            adjusted.limit_price = Some(Self::requoted_market_price(
+                base_price,
+                adjusted.side,
+                attempt,
+            )?);
             let result = if reduce_only {
-                self.executor.close(&adjusted).await
+                self.executor.close_result(&adjusted).await
             } else {
-                self.executor.submit(&adjusted).await
+                self.executor.submit_result(&adjusted).await
             };
             match result {
-                Ok(value) => return Ok(value),
+                Ok(value @ OrderSubmitResult::Filled(_)) => return Ok(value),
+                Ok(OrderSubmitResult::Resting { .. }) => {
+                    let err = ExecutionError::Fatal("order resting on book".to_string());
+                    let retryable_no_match = Self::is_ioc_no_match(&err);
+                    if (err.is_transient() || retryable_no_match) && attempt + 1 < attempts {
+                        sleep(Duration::from_millis(delay)).await;
+                        delay = delay.saturating_mul(2);
+                        continue;
+                    }
+                    return Err(err);
+                }
                 Err(err) => {
                     let retryable_no_match = Self::is_ioc_no_match(&err);
                     if (err.is_transient() || retryable_no_match) && attempt + 1 < attempts {

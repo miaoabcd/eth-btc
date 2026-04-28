@@ -2,7 +2,8 @@ use rust_decimal_macros::dec;
 
 use eth_btc_strategy::config::{OrderType, Symbol};
 use eth_btc_strategy::execution::{
-    ExecutionEngine, ExecutionError, MockOrderExecutor, OrderRequest, OrderSide, RetryConfig,
+    ExecutionEngine, ExecutionError, MockOrderExecutor, OrderExecutor, OrderRequest, OrderSide,
+    OrderSubmitResult, RetryConfig,
 };
 
 fn order(symbol: Symbol, side: OrderSide) -> OrderRequest {
@@ -13,6 +14,42 @@ fn order(symbol: Symbol, side: OrderSide) -> OrderRequest {
         order_type: OrderType::Market,
         limit_price: Some(dec!(1)),
         expires_after: None,
+    }
+}
+
+#[derive(Default)]
+struct RestingThenFailingExecutor {
+    cancelled: std::sync::Mutex<Vec<(Symbol, u64)>>,
+}
+
+#[async_trait::async_trait]
+impl OrderExecutor for RestingThenFailingExecutor {
+    async fn submit(&self, _order: &OrderRequest) -> Result<rust_decimal::Decimal, ExecutionError> {
+        Err(ExecutionError::Fatal("submit should not be used".into()))
+    }
+
+    async fn close(&self, _order: &OrderRequest) -> Result<rust_decimal::Decimal, ExecutionError> {
+        Err(ExecutionError::Fatal("close should not be used".into()))
+    }
+
+    async fn submit_result(
+        &self,
+        order: &OrderRequest,
+    ) -> Result<OrderSubmitResult, ExecutionError> {
+        match order.symbol {
+            Symbol::EthPerp => Ok(OrderSubmitResult::Resting { oid: 42 }),
+            Symbol::BtcPerp => Err(ExecutionError::Fatal(
+                "Post only order would have immediately matched".into(),
+            )),
+        }
+    }
+
+    async fn cancel(&self, symbol: Symbol, oid: u64) -> Result<(), ExecutionError> {
+        self.cancelled
+            .lock()
+            .expect("cancel lock")
+            .push((symbol, oid));
+        Ok(())
     }
 }
 
@@ -85,6 +122,32 @@ async fn open_pair_reports_rollback_failure() {
         }
         other => panic!("unexpected result: {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn open_pair_cancels_first_resting_leg_when_second_leg_fails() {
+    let executor = std::sync::Arc::new(RestingThenFailingExecutor::default());
+    let engine = ExecutionEngine::new(executor.clone(), RetryConfig::fast());
+    let result = engine
+        .open_pair(
+            OrderRequest {
+                order_type: OrderType::PostOnly,
+                ..order(Symbol::EthPerp, OrderSide::Sell)
+            },
+            OrderRequest {
+                order_type: OrderType::PostOnly,
+                ..order(Symbol::BtcPerp, OrderSide::Buy)
+            },
+        )
+        .await;
+
+    assert!(
+        matches!(result, Err(ExecutionError::Fatal(message)) if message.contains("first leg cancelled"))
+    );
+    assert_eq!(
+        executor.cancelled.lock().expect("cancel lock").as_slice(),
+        &[(Symbol::EthPerp, 42)]
+    );
 }
 
 #[tokio::test]

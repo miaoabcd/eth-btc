@@ -13,7 +13,7 @@ use eth_btc_strategy::core::strategy::StrategyEngine;
 use eth_btc_strategy::data::{DataError, MockPriceSource, PriceBar, PriceFetcher};
 use eth_btc_strategy::execution::{ExecutionEngine, PaperOrderExecutor, RetryConfig};
 use eth_btc_strategy::funding::{FundingFetcher, FundingRate, MockFundingSource};
-use eth_btc_strategy::logging::{BarLogWriter, LogEvent, TradeLog, TradeLogWriter};
+use eth_btc_strategy::logging::{BarLogWriter, LogEvent, TradeEvent, TradeLog, TradeLogWriter};
 use eth_btc_strategy::runtime::{LiveRunner, RunnerError, StateWriter};
 use eth_btc_strategy::state::{PositionLeg, PositionSnapshot, StrategyState, StrategyStatus};
 use eth_btc_strategy::storage::{PriceBarRecord, PriceBarWriter};
@@ -103,7 +103,9 @@ impl PriceBarWriter for MockPriceWriter {
 
 #[async_trait]
 impl AccountPositionSource for MockPositionSource {
-    async fn fetch_pair_exposure(&self) -> Result<PairExposure, eth_btc_strategy::account::AccountError> {
+    async fn fetch_pair_exposure(
+        &self,
+    ) -> Result<PairExposure, eth_btc_strategy::account::AccountError> {
         Ok(self.exposure.lock().expect("exposure lock").clone())
     }
 }
@@ -281,9 +283,11 @@ async fn runner_repairs_exchange_residual_before_processing_bar() {
         btc: None,
     };
     let writer = Arc::new(MockBarLogWriter::default());
+    let trade_writer = Arc::new(MockTradeLogWriter::default());
     runner = runner
         .with_position_source(position_source)
-        .with_stats_writer(writer.clone());
+        .with_stats_writer(writer.clone())
+        .with_trade_writer(trade_writer.clone());
 
     let outcome = runner.run_once_at(timestamp).await.unwrap();
 
@@ -291,6 +295,9 @@ async fn runner_repairs_exchange_residual_before_processing_bar() {
     assert!(outcome.events.contains(&LogEvent::ResidualRepair));
     let logged = writer.last().expect("expected stats log");
     assert!(logged.events.contains(&LogEvent::ResidualRepair));
+    let trade_logs = trade_writer.logs();
+    assert_eq!(trade_logs.len(), 1);
+    assert!(matches!(trade_logs[0].event, TradeEvent::ResidualRepair));
 }
 
 #[tokio::test]
@@ -317,6 +324,7 @@ async fn runner_flattens_local_state_when_exchange_is_flat() {
             }),
             pending_entry: None,
             cooldown_until: None,
+            cumulative_realized_pnl: dec!(0),
         })
         .unwrap();
     let position_source = Arc::new(MockPositionSource::default());

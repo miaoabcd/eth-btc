@@ -72,6 +72,8 @@ pub struct StrategyState {
     pub position: Option<PositionSnapshot>,
     pub pending_entry: Option<PendingEntrySnapshot>,
     pub cooldown_until: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub cumulative_realized_pnl: Decimal,
 }
 
 impl Default for StrategyState {
@@ -81,6 +83,7 @@ impl Default for StrategyState {
             position: None,
             pending_entry: None,
             cooldown_until: None,
+            cumulative_realized_pnl: Decimal::ZERO,
         }
     }
 }
@@ -110,6 +113,10 @@ impl StateMachine {
         self.state.cooldown_until = None;
     }
 
+    pub fn set_cumulative_realized_pnl(&mut self, value: Decimal) {
+        self.state.cumulative_realized_pnl = value;
+    }
+
     pub fn hydrate(&mut self, state: StrategyState) -> Result<(), StateError> {
         match state.status {
             StrategyStatus::Flat => {
@@ -130,8 +137,7 @@ impl StateMachine {
             StrategyStatus::InPosition => {
                 if state.position.is_none() || state.pending_entry.is_some() {
                     return Err(StateError::InvalidTransition(
-                        "in-position state must contain position and no pending entry"
-                            .to_string(),
+                        "in-position state must contain position and no pending entry".to_string(),
                     ));
                 }
             }
@@ -194,10 +200,7 @@ impl StateMachine {
         Ok(())
     }
 
-    pub fn confirm_pending_entry(
-        &mut self,
-        position: PositionSnapshot,
-    ) -> Result<(), StateError> {
+    pub fn confirm_pending_entry(&mut self, position: PositionSnapshot) -> Result<(), StateError> {
         if self.state.status != StrategyStatus::PendingEntry {
             return Err(StateError::InvalidTransition(
                 "cannot confirm pending entry unless pending".to_string(),

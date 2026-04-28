@@ -44,8 +44,8 @@ cd "$ROOT_DIR"
   fi
 
   set +e
-  "$BIN_PATH" --config "$CONFIG_PATH" --once
-  rc=$?
+  "$BIN_PATH" --config "$CONFIG_PATH" --once 2>&1 | sed -E 's/0x[[:xdigit:]]{40,}/0x[REDACTED]/g'
+  rc=${PIPESTATUS[0]}
   set -e
 
   echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] run_once end rc=$rc"

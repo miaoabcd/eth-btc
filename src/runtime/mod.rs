@@ -12,7 +12,7 @@ use crate::account::{AccountBalanceSource, AccountPositionSource};
 use crate::core::strategy::{StrategyBar, StrategyEngine, StrategyError, StrategyOutcome};
 use crate::data::{DataError, PriceFetcher};
 use crate::funding::FundingFetcher;
-use crate::logging::{BarLog, BarLogWriter, TradeLogWriter};
+use crate::logging::{BarLog, BarLogWriter, TradeLogWriter, redact_wallet_addresses};
 use crate::state::{StateError, StateStore, StrategyState};
 use crate::storage::{PriceBarRecord, PriceBarWriter};
 pub mod backfill;
@@ -167,7 +167,7 @@ impl LiveRunner {
                 funding_cost_est: None,
                 funding_skip: None,
                 entry_block_reason: None,
-                run_error: Some(err.to_string()),
+                run_error: Some(redact_wallet_addresses(&err.to_string())),
                 unrealized_pnl,
                 state: self.engine.state().state().status,
                 position,
@@ -272,7 +272,12 @@ impl LiveRunner {
                 Ok(exposure) => {
                     if let Err(err) = self
                         .engine
-                        .reconcile_exchange_position(&exposure, snapshot.timestamp)
+                        .reconcile_exchange_position(
+                            &exposure,
+                            snapshot.timestamp,
+                            snapshot.eth,
+                            snapshot.btc,
+                        )
                         .await
                     {
                         self.record_strategy_failure(

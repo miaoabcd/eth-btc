@@ -13,6 +13,7 @@ fn recovery_handles_missing_position() {
         position: None,
         pending_entry: None,
         cooldown_until: None,
+        cumulative_realized_pnl: dec!(0),
     };
 
     let report = recover_state(state, Utc.timestamp_opt(0, 0).unwrap());
@@ -42,6 +43,7 @@ fn recovery_flags_residual_position() {
         position: Some(position),
         pending_entry: None,
         cooldown_until: None,
+        cumulative_realized_pnl: dec!(0),
     };
 
     let report = recover_state(state, Utc.timestamp_opt(0, 0).unwrap());

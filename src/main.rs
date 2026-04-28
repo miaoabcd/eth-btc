@@ -14,7 +14,7 @@ use tracing_subscriber::EnvFilter;
 
 use alloy_signer_local::PrivateKeySigner;
 use eth_btc_strategy::account::{
-    AccountBalanceSource, AccountPositionSource, HyperliquidAccountSource,
+    AccountBalanceSource, AccountFillSource, AccountPositionSource, HyperliquidAccountSource,
 };
 use eth_btc_strategy::backtest::download::{HyperliquidDownloader, write_bars_to_output};
 use eth_btc_strategy::backtest::{
@@ -28,8 +28,8 @@ use eth_btc_strategy::data::{
     HyperliquidPriceSource, PriceFetcher, PriceSource, align_to_bar_close,
 };
 use eth_btc_strategy::execution::{
-    ExecutionEngine, LiveOrderExecutor, OrderExecutor, OrderRequest, OrderSide, PaperOrderExecutor,
-    RetryConfig, OrderSubmitResult,
+    ExecutionEngine, LiveOrderExecutor, OrderExecutor, OrderRequest, OrderSide, OrderSubmitResult,
+    PaperOrderExecutor, RetryConfig,
 };
 use eth_btc_strategy::funding::{FundingFetcher, HyperliquidFundingSource};
 use eth_btc_strategy::logging::{BarLogFileWriter, TradeLogFileWriter};
@@ -321,9 +321,10 @@ async fn main() -> anyhow::Result<()> {
         Some(FundingFetcher::new(Arc::new(source)))
     };
 
-    let (execution, account_source, position_source) = if paper {
+    let (execution, account_source, position_source, fill_source) = if paper {
         (
             ExecutionEngine::new(Arc::new(PaperOrderExecutor), RetryConfig::fast()),
+            None,
             None,
             None,
         )
@@ -346,15 +347,18 @@ async fn main() -> anyhow::Result<()> {
             .clone()
             .or_else(|| vault_address.clone())
             .unwrap_or_else(|| signer_wallet.clone());
-        let execution_wallet = vault_address
-            .clone()
-            .unwrap_or_else(|| signer_wallet.clone());
+        let account_wallet_source = if wallet_address.is_some() {
+            "wallet_address"
+        } else if vault_address.is_some() {
+            "vault_address"
+        } else {
+            "signer_wallet"
+        };
         info!(
-            signer_wallet = %signer_wallet,
-            wallet_address = ?wallet_address,
-            vault_address = ?vault_address,
-            account_wallet = %account_wallet,
-            execution_wallet = %execution_wallet,
+            wallet_address_configured = wallet_address.is_some(),
+            vault_address_configured = vault_address.is_some(),
+            account_wallet_source,
+            using_vault_execution = vault_address.is_some(),
             "resolved live trading wallet"
         );
         let live_account_source = Arc::new(HyperliquidAccountSource::new(
@@ -369,6 +373,7 @@ async fn main() -> anyhow::Result<()> {
             };
         let position_source: Option<Arc<dyn AccountPositionSource>> =
             Some(live_account_source.clone());
+        let fill_source: Option<Arc<dyn AccountFillSource>> = Some(live_account_source.clone());
         let mut executor = LiveOrderExecutor::with_private_key(base_url.clone(), key);
         if let Some(vault) = vault_address {
             executor = executor.with_vault_address(vault);
@@ -381,9 +386,13 @@ async fn main() -> anyhow::Result<()> {
             ExecutionEngine::new(Arc::new(executor), RetryConfig::fast()),
             account_source,
             position_source,
+            fill_source,
         )
     };
     let mut engine = StrategyEngine::new(config.clone(), execution).context("create engine")?;
+    if let Some(source) = fill_source {
+        engine = engine.with_fill_source(source);
+    }
 
     let mut state_writer: Option<Arc<dyn StateWriter>> = None;
     if let Some(path) = state_path.as_ref() {
@@ -576,9 +585,11 @@ fn build_order_test_request(
 
 fn order_test_output(result: OrderSubmitResult) -> Value {
     match result {
-        OrderSubmitResult::Filled(qty) => json!({
+        OrderSubmitResult::Filled(fill) => json!({
             "status": "filled",
-            "qty": qty,
+            "qty": fill.qty,
+            "avg_price": fill.avg_price,
+            "oid": fill.oid,
         }),
         OrderSubmitResult::Resting { oid } => json!({
             "status": "resting",

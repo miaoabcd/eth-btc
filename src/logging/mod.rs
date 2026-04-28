@@ -36,12 +36,21 @@ pub enum EntryBlockReason {
     FundingThreshold,
     BelowMinSizeEth,
     BelowMinSizeBtc,
+    PostOnlyWouldTake,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TradeEvent {
     Entry,
     Exit(ExitReason),
+    ResidualRepair,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum PnlSource {
+    ModelEstimate,
+    ExchangeFills,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -58,6 +67,9 @@ pub struct TradeLog {
     pub entry_btc_price: Decimal,
     pub realized_pnl: Decimal,
     pub cumulative_realized_pnl: Decimal,
+    pub fee: Decimal,
+    pub exchange_closed_pnl: Option<Decimal>,
+    pub pnl_source: PnlSource,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -180,7 +192,7 @@ impl TradeLogFormatter {
 
     pub fn format_text(&self, log: &TradeLog) -> String {
         format!(
-            "[{}] EVENT={:?} DIR={:?} ETH_QTY={} BTC_QTY={} ETH_PX={} BTC_PX={} ENTRY_TIME={} ENTRY_ETH_PX={} ENTRY_BTC_PX={} REALIZED_PNL={} CUM_REALIZED_PNL={}",
+            "[{}] EVENT={:?} DIR={:?} ETH_QTY={} BTC_QTY={} ETH_PX={} BTC_PX={} ENTRY_TIME={} ENTRY_ETH_PX={} ENTRY_BTC_PX={} REALIZED_PNL={} CUM_REALIZED_PNL={} FEE={} EXCHANGE_CLOSED_PNL={:?} PNL_SOURCE={:?}",
             log.timestamp.to_rfc3339(),
             log.event,
             log.direction,
@@ -192,7 +204,10 @@ impl TradeLogFormatter {
             log.entry_eth_price,
             log.entry_btc_price,
             log.realized_pnl,
-            log.cumulative_realized_pnl
+            log.cumulative_realized_pnl,
+            log.fee,
+            log.exchange_closed_pnl,
+            log.pnl_source
         )
     }
 }
@@ -455,7 +470,39 @@ pub fn redact_json_value(value: &Value) -> Value {
             Value::Object(redacted)
         }
         Value::Array(items) => Value::Array(items.iter().map(redact_json_value).collect()),
+        Value::String(value) => Value::String(redact_wallet_addresses(value)),
         other => other.clone(),
+    }
+}
+
+pub fn redact_wallet_addresses(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut output = String::with_capacity(value.len());
+    let mut start = 0usize;
+    let mut idx = 0usize;
+
+    while idx + 2 <= bytes.len() {
+        if bytes[idx] == b'0' && matches!(bytes.get(idx + 1), Some(b'x' | b'X')) {
+            let mut end = idx + 2;
+            while end < bytes.len() && bytes[end].is_ascii_hexdigit() {
+                end += 1;
+            }
+            if end - idx >= 42 {
+                output.push_str(&value[start..idx]);
+                output.push_str("0x[REDACTED]");
+                idx = end;
+                start = end;
+                continue;
+            }
+        }
+        idx += 1;
+    }
+
+    if start == 0 {
+        value.to_string()
+    } else {
+        output.push_str(&value[start..]);
+        output
     }
 }
 
