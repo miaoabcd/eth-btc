@@ -1,8 +1,9 @@
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 
 use chrono::{DateTime, Duration, Utc};
 use rust_decimal::Decimal;
+use rust_decimal::prelude::ToPrimitive;
 use thiserror::Error;
 
 use crate::account::{AccountFillSource, ExchangeFill, PairExposure};
@@ -61,6 +62,7 @@ pub struct StrategyEngine {
     state_machine: StateMachine,
     execution: ExecutionEngine,
     fill_source: Option<Arc<dyn AccountFillSource>>,
+    regime_tracker: SpreadHalfLifeTracker,
     cumulative_realized_pnl: Decimal,
     pending_events: Vec<LogEvent>,
     pending_trade_logs: Vec<TradeLog>,
@@ -85,6 +87,53 @@ struct CostGateDecision {
     pass: bool,
 }
 
+#[derive(Debug, Clone)]
+struct RegimeGateSnapshot {
+    half_life_bars: Option<f64>,
+    pass: Option<bool>,
+}
+
+#[derive(Debug, Clone)]
+struct SpreadHalfLifeTracker {
+    lookback_bars: usize,
+    values: VecDeque<Decimal>,
+}
+
+impl SpreadHalfLifeTracker {
+    fn new(lookback_bars: usize) -> Self {
+        Self {
+            lookback_bars: lookback_bars.max(3),
+            values: VecDeque::with_capacity(lookback_bars.max(3)),
+        }
+    }
+
+    fn push(
+        &mut self,
+        value: Decimal,
+        max_half_life_bars: f64,
+        enabled: bool,
+    ) -> RegimeGateSnapshot {
+        if self.values.len() == self.lookback_bars {
+            self.values.pop_front();
+        }
+        self.values.push_back(value);
+        let half_life_bars = if self.values.len() >= self.lookback_bars {
+            estimate_half_life_bars_decimal(&self.values)
+        } else {
+            None
+        };
+        let pass = if enabled {
+            Some(half_life_bars.is_some_and(|value| value <= max_half_life_bars))
+        } else {
+            None
+        };
+        RegimeGateSnapshot {
+            half_life_bars,
+            pass,
+        }
+    }
+}
+
 impl std::fmt::Debug for StrategyEngine {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("StrategyEngine")
@@ -102,6 +151,7 @@ impl StrategyEngine {
         Ok(Self {
             pipeline,
             state_machine: StateMachine::new(config.risk.clone()),
+            regime_tracker: SpreadHalfLifeTracker::new(config.regime_gate.lookback_bars),
             config,
             execution,
             fill_source: None,
@@ -150,6 +200,11 @@ impl StrategyEngine {
         }
 
         if exposure.has_residual() {
+            if local_state.status == StrategyStatus::PendingEntry
+                && let Some(pending) = local_state.pending_entry.as_ref()
+            {
+                self.cancel_pending_entry_orders(pending).await;
+            }
             let position = self.exposure_to_position(exposure, timestamp)?;
             warn!(
                 eth_qty = %position.eth.qty,
@@ -225,6 +280,18 @@ impl StrategyEngine {
                     fee: accounting.fee,
                     exchange_closed_pnl: accounting.exchange_closed_pnl,
                     pnl_source: accounting.source,
+                    eth_ref_price: Some(eth_price),
+                    btc_ref_price: Some(btc_price),
+                    eth_slippage_bps: Some(slippage_bps_for_side(
+                        eth_price,
+                        accounting.eth_price,
+                        entry_eth_side(position.direction),
+                    )),
+                    btc_slippage_bps: Some(slippage_bps_for_side(
+                        btc_price,
+                        accounting.btc_price,
+                        entry_btc_side(position.direction),
+                    )),
                 });
                 Ok(())
             }
@@ -288,7 +355,7 @@ impl StrategyEngine {
                     record.timestamp
                 ))
             })?;
-            let _ = self
+            let output = self
                 .pipeline
                 .update(
                     record.timestamp,
@@ -298,6 +365,11 @@ impl StrategyEngine {
                     self.state_machine.state().position.as_ref(),
                 )
                 .map_err(|err| StrategyError::Indicator(err.to_string()))?;
+            self.regime_tracker.push(
+                output.r,
+                self.config.regime_gate.max_half_life_bars,
+                self.config.regime_gate.enabled,
+            );
         }
         Ok(())
     }
@@ -365,6 +437,11 @@ impl StrategyEngine {
         let vol_snapshot = output.vol_snapshot;
         let entry_signal = output.entry_signal;
         let exit_signal = output.exit_signal;
+        let regime_snapshot = self.regime_tracker.push(
+            output.r,
+            self.config.regime_gate.max_half_life_bars,
+            self.config.regime_gate.enabled,
+        );
 
         let mut w_eth = None;
         let mut w_btc = None;
@@ -372,6 +449,8 @@ impl StrategyEngine {
         let mut notional_btc = None;
         let mut funding_cost_est = None;
         let mut funding_skip = None;
+        let regime_half_life_bars = regime_snapshot.half_life_bars;
+        let regime_gate_pass = regime_snapshot.pass;
         let mut expected_edge_bps = None;
         let mut estimated_cost_bps = None;
         let mut estimated_net_edge_bps = None;
@@ -479,6 +558,8 @@ impl StrategyEngine {
                         Some(notional_btc_value),
                         funding_cost_est,
                         funding_skip,
+                        regime_half_life_bars,
+                        regime_gate_pass,
                         expected_edge_bps,
                         estimated_cost_bps,
                         estimated_net_edge_bps,
@@ -503,6 +584,8 @@ impl StrategyEngine {
                         Some(notional_btc_value),
                         funding_cost_est,
                         funding_skip,
+                        regime_half_life_bars,
+                        regime_gate_pass,
                         expected_edge_bps,
                         estimated_cost_bps,
                         estimated_net_edge_bps,
@@ -512,6 +595,31 @@ impl StrategyEngine {
                         trade_logs,
                     ));
                 }
+            }
+
+            if self.config.regime_gate.enabled && regime_gate_pass != Some(true) {
+                entry_block_reason = Some(EntryBlockReason::RegimeGate);
+                return Ok(self.build_outcome(
+                    bar,
+                    z_snapshot,
+                    vol_snapshot,
+                    events,
+                    w_eth,
+                    w_btc,
+                    Some(notional_eth_value),
+                    Some(notional_btc_value),
+                    funding_cost_est,
+                    funding_skip,
+                    regime_half_life_bars,
+                    regime_gate_pass,
+                    expected_edge_bps,
+                    estimated_cost_bps,
+                    estimated_net_edge_bps,
+                    cost_gate_required_net_edge_bps,
+                    cost_gate_pass,
+                    entry_block_reason,
+                    trade_logs,
+                ));
             }
 
             if let Some(decision) = self.cost_gate_decision(
@@ -539,6 +647,8 @@ impl StrategyEngine {
                         Some(notional_btc_value),
                         funding_cost_est,
                         funding_skip,
+                        regime_half_life_bars,
+                        regime_gate_pass,
                         expected_edge_bps,
                         estimated_cost_bps,
                         estimated_net_edge_bps,
@@ -582,6 +692,8 @@ impl StrategyEngine {
                         Some(notional_btc_value),
                         funding_cost_est,
                         funding_skip,
+                        regime_half_life_bars,
+                        regime_gate_pass,
                         expected_edge_bps,
                         estimated_cost_bps,
                         estimated_net_edge_bps,
@@ -609,6 +721,8 @@ impl StrategyEngine {
                         Some(notional_btc_value),
                         funding_cost_est,
                         funding_skip,
+                        regime_half_life_bars,
+                        regime_gate_pass,
                         expected_edge_bps,
                         estimated_cost_bps,
                         estimated_net_edge_bps,
@@ -683,6 +797,8 @@ impl StrategyEngine {
                         notional_btc,
                         funding_cost_est,
                         funding_skip,
+                        regime_half_life_bars,
+                        regime_gate_pass,
                         expected_edge_bps,
                         estimated_cost_bps,
                         estimated_net_edge_bps,
@@ -763,6 +879,18 @@ impl StrategyEngine {
                         fee: accounting.fee,
                         exchange_closed_pnl: accounting.exchange_closed_pnl,
                         pnl_source: accounting.source,
+                        eth_ref_price: Some(bar.eth_price),
+                        btc_ref_price: Some(bar.btc_price),
+                        eth_slippage_bps: Some(slippage_bps_for_side(
+                            bar.eth_price,
+                            accounting.eth_price,
+                            eth_side,
+                        )),
+                        btc_slippage_bps: Some(slippage_bps_for_side(
+                            bar.btc_price,
+                            accounting.btc_price,
+                            btc_side,
+                        )),
                     });
                 }
                 PairOpenOutcome::Resting(resting) => {
@@ -892,6 +1020,18 @@ impl StrategyEngine {
                 fee: accounting.fee,
                 exchange_closed_pnl: accounting.exchange_closed_pnl,
                 pnl_source: accounting.source,
+                eth_ref_price: Some(bar.eth_price),
+                btc_ref_price: Some(bar.btc_price),
+                eth_slippage_bps: Some(slippage_bps_for_side(
+                    bar.eth_price,
+                    accounting.eth_price,
+                    eth_side,
+                )),
+                btc_slippage_bps: Some(slippage_bps_for_side(
+                    bar.btc_price,
+                    accounting.btc_price,
+                    btc_side,
+                )),
             });
             self.state_machine
                 .exit(exit_signal.reason, bar.timestamp)
@@ -910,6 +1050,8 @@ impl StrategyEngine {
             notional_btc,
             funding_cost_est,
             funding_skip,
+            regime_half_life_bars,
+            regime_gate_pass,
             expected_edge_bps,
             estimated_cost_bps,
             estimated_net_edge_bps,
@@ -933,6 +1075,8 @@ impl StrategyEngine {
         notional_btc: Option<Decimal>,
         funding_cost_est: Option<Decimal>,
         funding_skip: Option<bool>,
+        regime_half_life_bars: Option<f64>,
+        regime_gate_pass: Option<bool>,
         expected_edge_bps: Option<Decimal>,
         estimated_cost_bps: Option<Decimal>,
         estimated_net_edge_bps: Option<Decimal>,
@@ -970,11 +1114,23 @@ impl StrategyEngine {
                 funding_btc: bar.funding_btc,
                 funding_cost_est,
                 funding_skip,
+                regime_half_life_bars,
+                regime_gate_pass,
                 expected_edge_bps,
                 estimated_cost_bps,
                 estimated_net_edge_bps,
                 cost_gate_required_net_edge_bps,
                 cost_gate_pass,
+                eth_best_bid: None,
+                eth_best_ask: None,
+                eth_bid_size: None,
+                eth_ask_size: None,
+                eth_spread_bps: None,
+                btc_best_bid: None,
+                btc_best_ask: None,
+                btc_bid_size: None,
+                btc_ask_size: None,
+                btc_spread_bps: None,
                 entry_block_reason,
                 run_error: None,
                 unrealized_pnl,
@@ -1115,6 +1271,22 @@ impl StrategyEngine {
         self.cumulative_realized_pnl += pnl;
         self.state_machine
             .set_cumulative_realized_pnl(self.cumulative_realized_pnl);
+    }
+
+    async fn cancel_pending_entry_orders(&self, pending: &PendingEntrySnapshot) {
+        for (symbol, oid) in [
+            (Symbol::EthPerp, pending.eth_order_id),
+            (Symbol::BtcPerp, pending.btc_order_id),
+        ] {
+            if let Err(err) = self.execution.cancel_order(symbol, oid).await {
+                warn!(
+                    ?symbol,
+                    oid,
+                    error = %err,
+                    "failed to cancel pending entry order during residual repair"
+                );
+            }
+        }
     }
 
     fn model_accounting(
@@ -1307,6 +1479,10 @@ impl StrategyEngine {
             fee: accounting.fee,
             exchange_closed_pnl: accounting.exchange_closed_pnl,
             pnl_source: accounting.source,
+            eth_ref_price: None,
+            btc_ref_price: None,
+            eth_slippage_bps: None,
+            btc_slippage_bps: None,
         }
     }
 }
@@ -1322,6 +1498,72 @@ fn select_price(
         PriceField::Mark => mark.or(mid).or(close),
         PriceField::Close => close.or(mid).or(mark),
     }
+}
+
+fn estimate_half_life_bars_decimal(values: &VecDeque<Decimal>) -> Option<f64> {
+    if values.len() < 3 {
+        return None;
+    }
+    let series = values
+        .iter()
+        .map(|value| value.to_f64())
+        .collect::<Option<Vec<_>>>()?;
+    let mut x = Vec::with_capacity(series.len().saturating_sub(1));
+    let mut y = Vec::with_capacity(series.len().saturating_sub(1));
+    for idx in 1..series.len() {
+        x.push(series[idx - 1]);
+        y.push(series[idx] - series[idx - 1]);
+    }
+    let mean_x = x.iter().sum::<f64>() / x.len() as f64;
+    let mean_y = y.iter().sum::<f64>() / y.len() as f64;
+    let mut numerator = 0.0;
+    let mut denominator = 0.0;
+    for (xi, yi) in x.iter().zip(y.iter()) {
+        numerator += (xi - mean_x) * (yi - mean_y);
+        denominator += (xi - mean_x).powi(2);
+    }
+    if denominator <= f64::EPSILON {
+        return None;
+    }
+    let slope = numerator / denominator;
+    if slope >= 0.0 || !slope.is_finite() {
+        return None;
+    }
+    let half_life = -std::f64::consts::LN_2 / slope;
+    if half_life.is_finite() && half_life > 0.0 {
+        Some(half_life)
+    } else {
+        None
+    }
+}
+
+fn entry_eth_side(direction: TradeDirection) -> OrderSide {
+    match direction {
+        TradeDirection::LongEthShortBtc => OrderSide::Buy,
+        TradeDirection::ShortEthLongBtc => OrderSide::Sell,
+    }
+}
+
+fn entry_btc_side(direction: TradeDirection) -> OrderSide {
+    match direction {
+        TradeDirection::LongEthShortBtc => OrderSide::Sell,
+        TradeDirection::ShortEthLongBtc => OrderSide::Buy,
+    }
+}
+
+fn slippage_bps_for_side(
+    reference_price: Decimal,
+    fill_price: Decimal,
+    side: OrderSide,
+) -> Decimal {
+    if reference_price <= Decimal::ZERO {
+        return Decimal::ZERO;
+    }
+    let signed_cost = match side {
+        OrderSide::Buy => fill_price - reference_price,
+        OrderSide::Sell => reference_price - fill_price,
+    };
+    signed_cost / reference_price * Decimal::from(10_000u32)
 }
 
 fn compute_position_pnl(

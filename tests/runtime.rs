@@ -10,7 +10,10 @@ use eth_btc_strategy::account::{AccountPositionSource, MockAccountSource, PairEx
 use eth_btc_strategy::config::{CapitalMode, Config, SigmaFloorMode, Symbol};
 use eth_btc_strategy::core::TradeDirection;
 use eth_btc_strategy::core::strategy::StrategyEngine;
-use eth_btc_strategy::data::{DataError, MockPriceSource, PriceBar, PriceFetcher};
+use eth_btc_strategy::data::{
+    BookFetcher, DataError, MockBookSource, MockPriceSource, OrderBookSnapshot, PriceBar,
+    PriceFetcher,
+};
 use eth_btc_strategy::execution::{ExecutionEngine, PaperOrderExecutor, RetryConfig};
 use eth_btc_strategy::funding::{FundingFetcher, FundingRate, MockFundingSource};
 use eth_btc_strategy::logging::{BarLogWriter, LogEvent, TradeEvent, TradeLog, TradeLogWriter};
@@ -385,6 +388,45 @@ async fn runner_writes_stats_log() {
     assert_eq!(logged.timestamp, timestamp);
     assert_eq!(logged.eth_price, Some(dec!(2000)));
     assert_eq!(logged.btc_price, Some(dec!(30000)));
+}
+
+#[tokio::test]
+async fn runner_writes_market_book_telemetry_to_stats_log() {
+    let timestamp = Utc.timestamp_opt(0, 0).unwrap();
+    let mut runner = runner_with_mocks(timestamp);
+    let mut book_source = MockBookSource::default();
+    book_source.insert_book(OrderBookSnapshot {
+        symbol: Symbol::EthPerp,
+        best_bid: dec!(99),
+        best_ask: dec!(101),
+        bid_size: dec!(2),
+        ask_size: dec!(3),
+    });
+    book_source.insert_book(OrderBookSnapshot {
+        symbol: Symbol::BtcPerp,
+        best_bid: dec!(199),
+        best_ask: dec!(201),
+        bid_size: dec!(4),
+        ask_size: dec!(5),
+    });
+    let writer = Arc::new(MockBarLogWriter::default());
+    runner = runner
+        .with_book_fetcher(BookFetcher::new(Arc::new(book_source)))
+        .with_stats_writer(writer.clone());
+
+    runner.run_once_at(timestamp).await.unwrap();
+
+    let logged = writer.last().expect("expected stats log");
+    assert_eq!(logged.eth_best_bid, Some(dec!(99)));
+    assert_eq!(logged.eth_best_ask, Some(dec!(101)));
+    assert_eq!(logged.eth_bid_size, Some(dec!(2)));
+    assert_eq!(logged.eth_ask_size, Some(dec!(3)));
+    assert_eq!(logged.eth_spread_bps, Some(dec!(200)));
+    assert_eq!(logged.btc_best_bid, Some(dec!(199)));
+    assert_eq!(logged.btc_best_ask, Some(dec!(201)));
+    assert_eq!(logged.btc_bid_size, Some(dec!(4)));
+    assert_eq!(logged.btc_ask_size, Some(dec!(5)));
+    assert_eq!(logged.btc_spread_bps, Some(dec!(100)));
 }
 
 #[tokio::test]

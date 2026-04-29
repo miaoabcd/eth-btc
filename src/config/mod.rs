@@ -386,6 +386,23 @@ impl Default for CostGateConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RegimeGateConfig {
+    pub enabled: bool,
+    pub lookback_bars: usize,
+    pub max_half_life_bars: f64,
+}
+
+impl Default for RegimeGateConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            lookback_bars: 28,
+            max_half_life_bars: 40.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RiskConfig {
     pub max_hold_hours: u32,
     pub cooldown_hours: u32,
@@ -553,6 +570,7 @@ pub struct Config {
     pub position: PositionConfig,
     pub funding: FundingConfig,
     pub cost_gate: CostGateConfig,
+    pub regime_gate: RegimeGateConfig,
     pub risk: RiskConfig,
     pub data: DataConfig,
     pub execution: ExecutionConfig,
@@ -577,6 +595,7 @@ impl Default for Config {
             position: PositionConfig::default(),
             funding: FundingConfig::default(),
             cost_gate: CostGateConfig::default(),
+            regime_gate: RegimeGateConfig::default(),
             risk: RiskConfig::default(),
             data: DataConfig::default(),
             execution: ExecutionConfig::default(),
@@ -703,6 +722,21 @@ impl Config {
             "cost_gate.short_eth_long_btc_extra_bps",
             self.cost_gate.short_eth_long_btc_extra_bps,
         )?;
+        if self.regime_gate.enabled && self.regime_gate.lookback_bars < 3 {
+            return Err(ConfigError::InvalidValue {
+                field: "regime_gate.lookback_bars",
+                message: "must be >= 3 when regime_gate is enabled".to_string(),
+            });
+        }
+        if self.regime_gate.enabled
+            && (!self.regime_gate.max_half_life_bars.is_finite()
+                || self.regime_gate.max_half_life_bars <= 0.0)
+        {
+            return Err(ConfigError::InvalidValue {
+                field: "regime_gate.max_half_life_bars",
+                message: "must be positive and finite when regime_gate is enabled".to_string(),
+            });
+        }
         if let Some(leverage) = self.execution.leverage
             && leverage == 0
         {
@@ -906,6 +940,15 @@ impl Config {
         if let Some(value) = overrides.cost_gate.short_eth_long_btc_extra_bps {
             self.cost_gate.short_eth_long_btc_extra_bps = value;
         }
+        if let Some(value) = overrides.regime_gate.enabled {
+            self.regime_gate.enabled = value;
+        }
+        if let Some(value) = overrides.regime_gate.lookback_bars {
+            self.regime_gate.lookback_bars = value;
+        }
+        if let Some(value) = overrides.regime_gate.max_half_life_bars {
+            self.regime_gate.max_half_life_bars = value;
+        }
         if let Some(value) = overrides.risk.max_hold_hours {
             self.risk.max_hold_hours = value;
         }
@@ -1059,6 +1102,8 @@ pub struct ConfigOverrides {
     #[serde(default)]
     pub cost_gate: CostGateOverrides,
     #[serde(default)]
+    pub regime_gate: RegimeGateOverrides,
+    #[serde(default)]
     pub risk: RiskOverrides,
     #[serde(default)]
     pub data: DataOverrides,
@@ -1133,6 +1178,13 @@ pub struct CostGateOverrides {
     pub spread_bps: Option<Decimal>,
     pub long_eth_short_btc_extra_bps: Option<Decimal>,
     pub short_eth_long_btc_extra_bps: Option<Decimal>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct RegimeGateOverrides {
+    pub enabled: Option<bool>,
+    pub lookback_bars: Option<usize>,
+    pub max_half_life_bars: Option<f64>,
 }
 
 #[derive(Debug, Default, Deserialize)]

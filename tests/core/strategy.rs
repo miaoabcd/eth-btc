@@ -417,6 +417,62 @@ async fn strategy_engine_repairs_residual_leg_and_flats_state() {
 }
 
 #[tokio::test]
+async fn strategy_engine_cancels_pending_orders_when_reconcile_repairs_residual() {
+    let mut config = Config::default();
+    config.strategy.n_z = 1;
+    config.position.n_vol = 1;
+
+    let executor = std::sync::Arc::new(CancelTrackingExecutor::default());
+    let execution = ExecutionEngine::new(executor.clone(), RetryConfig::fast());
+    let mut engine = StrategyEngine::new(config, execution).unwrap();
+
+    engine
+        .apply_state(StrategyState {
+            status: StrategyStatus::PendingEntry,
+            position: None,
+            pending_entry: Some(eth_btc_strategy::state::PendingEntrySnapshot {
+                direction: TradeDirection::LongEthShortBtc,
+                eth_qty: dec!(0.079),
+                btc_qty: dec!(-0.0027),
+                eth_order_id: 11,
+                btc_order_id: 22,
+                submitted_at: Utc.timestamp_opt(100, 0).unwrap(),
+                expires_at: Utc.timestamp_opt(200, 0).unwrap(),
+            }),
+            cooldown_until: None,
+            cumulative_realized_pnl: dec!(0),
+        })
+        .unwrap();
+
+    let residual_exposure = PairExposure {
+        eth: None,
+        btc: Some(ExchangePosition {
+            qty: dec!(-0.0027),
+            entry_price: dec!(76546),
+            notional: dec!(206.6742),
+        }),
+    };
+
+    engine
+        .reconcile_exchange_position(
+            &residual_exposure,
+            Utc.timestamp_opt(201, 0).unwrap(),
+            dec!(2275),
+            dec!(76643),
+        )
+        .await
+        .unwrap();
+
+    let cancelled = executor.cancelled.lock().expect("cancel lock").clone();
+    assert_eq!(
+        cancelled,
+        vec![(Symbol::EthPerp, 11), (Symbol::BtcPerp, 22)]
+    );
+    assert_eq!(engine.state().state().status, StrategyStatus::Flat);
+    assert!(engine.state().state().pending_entry.is_none());
+}
+
+#[tokio::test]
 async fn strategy_engine_treats_post_only_would_take_as_blocked_entry() {
     let mut config = Config::default();
     config.strategy.n_z = 3;
@@ -525,6 +581,54 @@ async fn strategy_engine_blocks_entry_when_cost_gate_fails() {
     assert!(outcome.bar_log.estimated_net_edge_bps.is_some());
     assert!(outcome.events.is_empty());
     assert!(outcome.trade_logs.is_empty());
+    assert!(recorder.submitted.lock().expect("submit lock").is_empty());
+}
+
+#[tokio::test]
+async fn strategy_engine_blocks_entry_when_half_life_gate_fails() {
+    let mut config = Config::default();
+    config.strategy.n_z = 3;
+    config.position.n_vol = 1;
+    config.strategy.entry_z = dec!(0.5);
+    config.strategy.sl_z = dec!(10.0);
+    config.position.c_value = Some(dec!(100));
+    config.regime_gate.enabled = true;
+    config.regime_gate.lookback_bars = 4;
+    config.regime_gate.max_half_life_bars = 1.0;
+
+    let recorder = std::sync::Arc::new(RecordingExecutor::default());
+    let execution = ExecutionEngine::new(recorder.clone(), RetryConfig::fast());
+    let mut engine = StrategyEngine::new(config, execution).unwrap();
+
+    for (offset, eth_price) in [
+        (0, dec!(100)),
+        (900, dec!(100)),
+        (1800, dec!(100)),
+        (2700, dec!(271.8281828)),
+    ] {
+        let outcome = engine
+            .process_bar(eth_btc_strategy::core::strategy::StrategyBar {
+                timestamp: Utc.timestamp_opt(offset, 0).unwrap(),
+                eth_price,
+                btc_price: dec!(100),
+                equity: None,
+                funding_eth: None,
+                funding_btc: None,
+                funding_interval_hours: None,
+            })
+            .await
+            .unwrap();
+        if offset == 2700 {
+            assert_eq!(outcome.state, StrategyStatus::Flat);
+            assert_eq!(
+                outcome.bar_log.entry_block_reason,
+                Some(EntryBlockReason::RegimeGate)
+            );
+            assert_eq!(outcome.bar_log.regime_gate_pass, Some(false));
+            assert!(outcome.bar_log.regime_half_life_bars.is_none());
+        }
+    }
+
     assert!(recorder.submitted.lock().expect("submit lock").is_empty());
 }
 
@@ -1116,6 +1220,10 @@ async fn strategy_engine_uses_exchange_fills_for_trade_log_pnl() {
     assert_eq!(entry_log.exchange_closed_pnl, Some(dec!(0)));
     assert_eq!(entry_log.realized_pnl, dec!(-0.03));
     assert_eq!(entry_log.cumulative_realized_pnl, dec!(-0.03));
+    assert_eq!(entry_log.eth_ref_price, Some(dec!(271.8281828)));
+    assert_eq!(entry_log.btc_ref_price, Some(dec!(100)));
+    assert!(entry_log.eth_slippage_bps.is_some());
+    assert!(entry_log.btc_slippage_bps.is_some());
     let position = engine.state().state().position.as_ref().unwrap();
     assert_eq!(position.eth.avg_price, dec!(101));
     assert_eq!(position.btc.avg_price, dec!(99));
@@ -1143,6 +1251,10 @@ async fn strategy_engine_uses_exchange_fills_for_trade_log_pnl() {
     assert_eq!(exit_log.exchange_closed_pnl, Some(dec!(18)));
     assert_eq!(exit_log.realized_pnl, dec!(17.93));
     assert_eq!(exit_log.cumulative_realized_pnl, dec!(17.90));
+    assert_eq!(exit_log.eth_ref_price, Some(dec!(164.872127)));
+    assert_eq!(exit_log.btc_ref_price, Some(dec!(100)));
+    assert!(exit_log.eth_slippage_bps.is_some());
+    assert!(exit_log.btc_slippage_bps.is_some());
     assert_eq!(engine.state().state().cumulative_realized_pnl, dec!(17.90));
 }
 

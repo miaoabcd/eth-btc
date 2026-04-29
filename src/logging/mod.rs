@@ -35,6 +35,7 @@ pub enum EntryBlockReason {
     FundingFilter,
     FundingThreshold,
     CostGate,
+    RegimeGate,
     BelowMinSizeEth,
     BelowMinSizeBtc,
     PostOnlyWouldTake,
@@ -71,6 +72,10 @@ pub struct TradeLog {
     pub fee: Decimal,
     pub exchange_closed_pnl: Option<Decimal>,
     pub pnl_source: PnlSource,
+    pub eth_ref_price: Option<Decimal>,
+    pub btc_ref_price: Option<Decimal>,
+    pub eth_slippage_bps: Option<Decimal>,
+    pub btc_slippage_bps: Option<Decimal>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -93,11 +98,23 @@ pub struct BarLog {
     pub funding_btc: Option<Decimal>,
     pub funding_cost_est: Option<Decimal>,
     pub funding_skip: Option<bool>,
+    pub regime_half_life_bars: Option<f64>,
+    pub regime_gate_pass: Option<bool>,
     pub expected_edge_bps: Option<Decimal>,
     pub estimated_cost_bps: Option<Decimal>,
     pub estimated_net_edge_bps: Option<Decimal>,
     pub cost_gate_required_net_edge_bps: Option<Decimal>,
     pub cost_gate_pass: Option<bool>,
+    pub eth_best_bid: Option<Decimal>,
+    pub eth_best_ask: Option<Decimal>,
+    pub eth_bid_size: Option<Decimal>,
+    pub eth_ask_size: Option<Decimal>,
+    pub eth_spread_bps: Option<Decimal>,
+    pub btc_best_bid: Option<Decimal>,
+    pub btc_best_ask: Option<Decimal>,
+    pub btc_bid_size: Option<Decimal>,
+    pub btc_ask_size: Option<Decimal>,
+    pub btc_spread_bps: Option<Decimal>,
     pub entry_block_reason: Option<EntryBlockReason>,
     pub run_error: Option<String>,
     pub unrealized_pnl: Decimal,
@@ -198,7 +215,7 @@ impl TradeLogFormatter {
 
     pub fn format_text(&self, log: &TradeLog) -> String {
         format!(
-            "[{}] EVENT={:?} DIR={:?} ETH_QTY={} BTC_QTY={} ETH_PX={} BTC_PX={} ENTRY_TIME={} ENTRY_ETH_PX={} ENTRY_BTC_PX={} REALIZED_PNL={} CUM_REALIZED_PNL={} FEE={} EXCHANGE_CLOSED_PNL={:?} PNL_SOURCE={:?}",
+            "[{}] EVENT={:?} DIR={:?} ETH_QTY={} BTC_QTY={} ETH_PX={} BTC_PX={} ENTRY_TIME={} ENTRY_ETH_PX={} ENTRY_BTC_PX={} REALIZED_PNL={} CUM_REALIZED_PNL={} FEE={} EXCHANGE_CLOSED_PNL={:?} PNL_SOURCE={:?} ETH_REF_PX={:?} BTC_REF_PX={:?} ETH_SLIP_BPS={:?} BTC_SLIP_BPS={:?}",
             log.timestamp.to_rfc3339(),
             log.event,
             log.direction,
@@ -213,7 +230,11 @@ impl TradeLogFormatter {
             log.cumulative_realized_pnl,
             log.fee,
             log.exchange_closed_pnl,
-            log.pnl_source
+            log.pnl_source,
+            log.eth_ref_price,
+            log.btc_ref_price,
+            log.eth_slippage_bps,
+            log.btc_slippage_bps,
         )
     }
 }

@@ -99,6 +99,58 @@ pub trait PriceSource: Send + Sync {
     ) -> Result<Vec<PriceBar>, DataError>;
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct OrderBookSnapshot {
+    pub symbol: Symbol,
+    pub best_bid: Decimal,
+    pub best_ask: Decimal,
+    pub bid_size: Decimal,
+    pub ask_size: Decimal,
+}
+
+impl OrderBookSnapshot {
+    pub fn spread_bps(&self) -> Option<Decimal> {
+        if self.best_bid <= Decimal::ZERO || self.best_ask <= Decimal::ZERO {
+            return None;
+        }
+        let mid = (self.best_bid + self.best_ask) / Decimal::from(2u32);
+        if mid <= Decimal::ZERO {
+            return None;
+        }
+        Some((self.best_ask - self.best_bid) / mid * Decimal::from(10_000u32))
+    }
+
+    fn validate(&self) -> Result<(), DataError> {
+        if self.best_bid <= Decimal::ZERO || self.best_ask <= Decimal::ZERO {
+            return Err(DataError::InvalidPrice(
+                "best bid/ask must be > 0".to_string(),
+            ));
+        }
+        if self.best_bid >= self.best_ask {
+            return Err(DataError::InconsistentData(
+                "best bid must be < best ask".to_string(),
+            ));
+        }
+        if self.bid_size < Decimal::ZERO || self.ask_size < Decimal::ZERO {
+            return Err(DataError::InvalidPrice(
+                "book sizes must be non-negative".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PairOrderBookSnapshot {
+    pub eth: OrderBookSnapshot,
+    pub btc: OrderBookSnapshot,
+}
+
+#[async_trait::async_trait]
+pub trait BookSource: Send + Sync {
+    async fn fetch_book(&self, symbol: Symbol) -> Result<OrderBookSnapshot, DataError>;
+}
+
 #[derive(Debug, Clone)]
 pub struct HttpResponse {
     pub status: u16,
@@ -280,6 +332,53 @@ impl HyperliquidPriceSource {
         }
         Ok(bars)
     }
+
+    fn parse_book(&self, symbol: Symbol, body: &str) -> Result<OrderBookSnapshot, DataError> {
+        let value: Value =
+            serde_json::from_str(body).map_err(|err| DataError::Parse(err.to_string()))?;
+        let levels = value
+            .get("levels")
+            .and_then(Value::as_array)
+            .ok_or_else(|| DataError::MissingData("book levels missing".to_string()))?;
+        if levels.len() < 2 {
+            return Err(DataError::MissingData(
+                "book levels missing bid/ask sides".to_string(),
+            ));
+        }
+        let bid = levels[0]
+            .as_array()
+            .and_then(|side| side.first())
+            .ok_or_else(|| DataError::MissingData("best bid missing".to_string()))?;
+        let ask = levels[1]
+            .as_array()
+            .and_then(|side| side.first())
+            .ok_or_else(|| DataError::MissingData("best ask missing".to_string()))?;
+        let best_bid = Self::parse_decimal(
+            bid.get("px")
+                .ok_or_else(|| DataError::MissingData("best bid px missing".to_string()))?,
+        )?;
+        let bid_size = Self::parse_decimal(
+            bid.get("sz")
+                .ok_or_else(|| DataError::MissingData("best bid sz missing".to_string()))?,
+        )?;
+        let best_ask = Self::parse_decimal(
+            ask.get("px")
+                .ok_or_else(|| DataError::MissingData("best ask px missing".to_string()))?,
+        )?;
+        let ask_size = Self::parse_decimal(
+            ask.get("sz")
+                .ok_or_else(|| DataError::MissingData("best ask sz missing".to_string()))?,
+        )?;
+        let snapshot = OrderBookSnapshot {
+            symbol,
+            best_bid,
+            best_ask,
+            bid_size,
+            ask_size,
+        };
+        snapshot.validate()?;
+        Ok(snapshot)
+    }
 }
 
 #[async_trait::async_trait]
@@ -356,6 +455,24 @@ impl PriceSource for HyperliquidPriceSource {
         }
 
         Ok(merged.into_values().collect())
+    }
+}
+
+#[async_trait::async_trait]
+impl BookSource for HyperliquidPriceSource {
+    async fn fetch_book(&self, symbol: Symbol) -> Result<OrderBookSnapshot, DataError> {
+        let url = self.endpoint_url();
+        let body = serde_json::json!({
+            "type": "l2Book",
+            "coin": Self::symbol_string(symbol),
+        });
+        self.rate_limiter.wait().await;
+        let response = self.http.post(&url, body).await?;
+        match response.status {
+            200 => self.parse_book(symbol, &response.body),
+            429 => Err(DataError::RateLimited),
+            status => Err(DataError::Http(format!("unexpected status {status}"))),
+        }
     }
 }
 
@@ -457,12 +574,58 @@ impl PriceFetcher {
     }
 }
 
+#[derive(Clone)]
+pub struct BookFetcher {
+    source: Arc<dyn BookSource>,
+}
+
+impl BookFetcher {
+    pub fn new(source: Arc<dyn BookSource>) -> Self {
+        Self { source }
+    }
+
+    pub async fn fetch_pair_books(&self) -> Result<PairOrderBookSnapshot, DataError> {
+        let eth = self.source.fetch_book(Symbol::EthPerp).await?;
+        let btc = self.source.fetch_book(Symbol::BtcPerp).await?;
+        Ok(PairOrderBookSnapshot { eth, btc })
+    }
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct MockPriceSource {
     bars: HashMap<(Symbol, DateTime<Utc>), PriceBar>,
     history: HashMap<Symbol, Vec<PriceBar>>,
     errors: HashMap<(Symbol, DateTime<Utc>), DataError>,
     history_errors: HashMap<Symbol, DataError>,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct MockBookSource {
+    books: HashMap<Symbol, OrderBookSnapshot>,
+    errors: HashMap<Symbol, DataError>,
+}
+
+impl MockBookSource {
+    pub fn insert_book(&mut self, book: OrderBookSnapshot) {
+        self.books.insert(book.symbol, book);
+    }
+
+    pub fn insert_error(&mut self, symbol: Symbol, error: DataError) {
+        self.errors.insert(symbol, error);
+    }
+}
+
+#[async_trait::async_trait]
+impl BookSource for MockBookSource {
+    async fn fetch_book(&self, symbol: Symbol) -> Result<OrderBookSnapshot, DataError> {
+        if let Some(error) = self.errors.get(&symbol) {
+            return Err(error.clone());
+        }
+        self.books
+            .get(&symbol)
+            .cloned()
+            .ok_or_else(|| DataError::MissingData("book not found".to_string()))
+    }
 }
 
 impl MockPriceSource {

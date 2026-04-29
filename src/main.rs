@@ -17,9 +17,12 @@ use eth_btc_strategy::account::{
     AccountBalanceSource, AccountFillSource, AccountPositionSource, HyperliquidAccountSource,
 };
 use eth_btc_strategy::analysis::{
+    FundingCarryReplayConfig, RegimeStudyConfig, RegimeSweepConfig,
     analyze_trade_history_csv_since, build_trade_attribution_report,
-    default_replay_strategy_configs, format_report_text, format_stats_replay_text,
-    replay_stats_log,
+    default_replay_strategy_configs, format_funding_carry_replay_text, format_regime_study_text,
+    format_regime_sweep_text, format_report_text, format_stats_replay_text,
+    replay_funding_carry_stats_log, replay_stats_log, study_residual_regimes,
+    sweep_residual_regime_parameters,
 };
 use eth_btc_strategy::backtest::download::{HyperliquidDownloader, write_bars_to_output};
 use eth_btc_strategy::backtest::{
@@ -30,7 +33,7 @@ use eth_btc_strategy::cli::{AnalyzeOutputFormat, Cli, Command};
 use eth_btc_strategy::config::{CapitalMode, ExecutionConfig, OrderType, load_config};
 use eth_btc_strategy::core::strategy::StrategyEngine;
 use eth_btc_strategy::data::{
-    HyperliquidPriceSource, PriceFetcher, PriceSource, align_to_bar_close,
+    BookFetcher, HyperliquidPriceSource, PriceFetcher, PriceSource, align_to_bar_close,
 };
 use eth_btc_strategy::execution::{
     ExecutionEngine, LiveOrderExecutor, OrderExecutor, OrderRequest, OrderSide, OrderSubmitResult,
@@ -139,12 +142,87 @@ async fn main() -> anyhow::Result<()> {
                 let cycles = analyze_trade_history_csv_since(&content, since)
                     .context("analyze trade history")?;
                 let report = build_trade_attribution_report(cycles);
-                let stats_replay = if let Some(stats_path) = args.stats_log.as_ref() {
-                    let stats_content = std::fs::read_to_string(stats_path)
-                        .with_context(|| format!("read stats log {}", stats_path.display()))?;
+                let stats_content = if let Some(stats_path) = args.stats_log.as_ref() {
                     Some(
-                        replay_stats_log(&stats_content, since, &default_replay_strategy_configs())
+                        std::fs::read_to_string(stats_path)
+                            .with_context(|| format!("read stats log {}", stats_path.display()))?,
+                    )
+                } else {
+                    None
+                };
+                let stats_replay = if let Some(stats_content) = stats_content.as_ref() {
+                    Some(
+                        replay_stats_log(stats_content, since, &default_replay_strategy_configs())
                             .context("replay stats log")?,
+                    )
+                } else {
+                    None
+                };
+                let regime_study = if args.regime_study {
+                    let stats_content = stats_content
+                        .as_ref()
+                        .ok_or_else(|| anyhow!("--regime-study requires --stats-log"))?;
+                    Some(
+                        study_residual_regimes(
+                            stats_content,
+                            since,
+                            &RegimeStudyConfig {
+                                lookback_bars: args.regime_lookback_bars,
+                                max_half_life_bars: args.regime_max_half_life_bars,
+                                entry_z: config.strategy.entry_z,
+                                tp_z: config.strategy.tp_z,
+                                sl_z: config.strategy.sl_z,
+                            },
+                        )
+                        .context("study residual regimes")?,
+                    )
+                } else {
+                    None
+                };
+                let regime_sweep = if args.regime_sweep {
+                    let stats_content = stats_content
+                        .as_ref()
+                        .ok_or_else(|| anyhow!("--regime-sweep requires --stats-log"))?;
+                    Some(
+                        sweep_residual_regime_parameters(
+                            stats_content,
+                            since,
+                            &RegimeSweepConfig {
+                                lookback_bars: parse_usize_csv(&args.regime_sweep_lookbacks)
+                                    .context("parse --regime-sweep-lookbacks")?,
+                                entry_z_values: parse_decimal_csv(&args.regime_sweep_entry_zs)
+                                    .context("parse --regime-sweep-entry-zs")?,
+                                max_half_life_bars: parse_f64_csv(&args.regime_sweep_half_lives)
+                                    .context("parse --regime-sweep-half-lives")?,
+                                tp_z: config.strategy.tp_z,
+                                sl_z: config.strategy.sl_z,
+                                min_trades: args.regime_sweep_min_trades,
+                                top_n: args.regime_sweep_top,
+                            },
+                        )
+                        .context("sweep residual regime parameters")?,
+                    )
+                } else {
+                    None
+                };
+                let funding_carry_replay = if args.funding_carry_replay {
+                    let stats_content = stats_content
+                        .as_ref()
+                        .ok_or_else(|| anyhow!("--funding-carry-replay requires --stats-log"))?;
+                    Some(
+                        replay_funding_carry_stats_log(
+                            stats_content,
+                            since,
+                            &FundingCarryReplayConfig {
+                                entry_z: config.strategy.entry_z,
+                                tp_z: config.strategy.tp_z,
+                                sl_z: config.strategy.sl_z,
+                                min_net_edge_bps: args.funding_carry_min_net_edge_bps,
+                                max_hold_hours: args.funding_carry_max_hold_hours,
+                                funding_interval_hours: args.funding_carry_interval_hours,
+                            },
+                        )
+                        .context("replay funding carry stats log")?,
                     )
                 } else {
                     None
@@ -155,11 +233,23 @@ async fn main() -> anyhow::Result<()> {
                         if let Some(stats_replay) = stats_replay.as_ref() {
                             print!("{}", format_stats_replay_text(stats_replay));
                         }
+                        if let Some(regime_study) = regime_study.as_ref() {
+                            print!("{}", format_regime_study_text(regime_study));
+                        }
+                        if let Some(regime_sweep) = regime_sweep.as_ref() {
+                            print!("{}", format_regime_sweep_text(regime_sweep));
+                        }
+                        if let Some(funding_carry_replay) = funding_carry_replay.as_ref() {
+                            print!("{}", format_funding_carry_replay_text(funding_carry_replay));
+                        }
                     }
                     AnalyzeOutputFormat::Json => {
                         let payload = serde_json::to_string_pretty(&json!({
                             "trade_attribution": report,
                             "stats_replay": stats_replay,
+                            "regime_study": regime_study,
+                            "regime_sweep": regime_sweep,
+                            "funding_carry_replay": funding_carry_replay,
                         }))
                         .context("format trade analysis")?;
                         println!("{payload}");
@@ -362,6 +452,7 @@ async fn main() -> anyhow::Result<()> {
 
     let price_source = HyperliquidPriceSource::new(base_url.clone());
     let price_fetcher = PriceFetcher::new(Arc::new(price_source.clone()), config.data.price_field);
+    let book_fetcher = BookFetcher::new(Arc::new(price_source.clone()));
 
     let funding_fetcher = if disable_funding {
         None
@@ -458,7 +549,8 @@ async fn main() -> anyhow::Result<()> {
         state_writer = Some(Arc::new(StateStoreWriter::new(store)));
     }
 
-    let mut runner = LiveRunner::new(engine, price_fetcher, funding_fetcher);
+    let mut runner =
+        LiveRunner::new(engine, price_fetcher, funding_fetcher).with_book_fetcher(book_fetcher);
     if let Some(source) = account_source {
         runner = runner.with_account_source(source);
     }
@@ -568,6 +660,51 @@ fn parse_rfc3339(value: &str) -> anyhow::Result<DateTime<Utc>> {
     let parsed = DateTime::parse_from_rfc3339(value)
         .with_context(|| format!("invalid RFC3339 timestamp: {value}"))?;
     Ok(parsed.with_timezone(&Utc))
+}
+
+fn parse_usize_csv(value: &str) -> anyhow::Result<Vec<usize>> {
+    parse_csv_items(value, |item| {
+        item.parse::<usize>()
+            .with_context(|| format!("invalid usize value: {item}"))
+    })
+}
+
+fn parse_f64_csv(value: &str) -> anyhow::Result<Vec<f64>> {
+    parse_csv_items(value, |item| {
+        let parsed = item
+            .parse::<f64>()
+            .with_context(|| format!("invalid f64 value: {item}"))?;
+        if parsed.is_finite() && parsed > 0.0 {
+            Ok(parsed)
+        } else {
+            Err(anyhow!("f64 value must be positive and finite: {item}"))
+        }
+    })
+}
+
+fn parse_decimal_csv(value: &str) -> anyhow::Result<Vec<Decimal>> {
+    parse_csv_items(value, |item| {
+        Decimal::from_str(item).with_context(|| format!("invalid decimal value: {item}"))
+    })
+}
+
+fn parse_csv_items<T>(
+    value: &str,
+    parse_item: impl Fn(&str) -> anyhow::Result<T>,
+) -> anyhow::Result<Vec<T>> {
+    let mut items = Vec::new();
+    for raw in value.split(',') {
+        let item = raw.trim();
+        if item.is_empty() {
+            continue;
+        }
+        items.push(parse_item(item)?);
+    }
+    if items.is_empty() {
+        Err(anyhow!("CSV value list must not be empty"))
+    } else {
+        Ok(items)
+    }
 }
 
 fn ioc_limit_from_ref_price(

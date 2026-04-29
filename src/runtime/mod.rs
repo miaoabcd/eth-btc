@@ -10,7 +10,7 @@ use tracing::{info, warn};
 
 use crate::account::{AccountBalanceSource, AccountPositionSource};
 use crate::core::strategy::{StrategyBar, StrategyEngine, StrategyError, StrategyOutcome};
-use crate::data::{DataError, PriceFetcher};
+use crate::data::{BookFetcher, DataError, PairOrderBookSnapshot, PriceFetcher};
 use crate::funding::FundingFetcher;
 use crate::logging::{BarLog, BarLogWriter, TradeLogWriter, redact_wallet_addresses};
 use crate::state::{StateError, StateStore, StrategyState};
@@ -52,9 +52,23 @@ impl StateWriter for StateStoreWriter {
     }
 }
 
+fn apply_book_snapshot(bar: &mut BarLog, snapshot: &PairOrderBookSnapshot) {
+    bar.eth_best_bid = Some(snapshot.eth.best_bid);
+    bar.eth_best_ask = Some(snapshot.eth.best_ask);
+    bar.eth_bid_size = Some(snapshot.eth.bid_size);
+    bar.eth_ask_size = Some(snapshot.eth.ask_size);
+    bar.eth_spread_bps = snapshot.eth.spread_bps();
+    bar.btc_best_bid = Some(snapshot.btc.best_bid);
+    bar.btc_best_ask = Some(snapshot.btc.best_ask);
+    bar.btc_bid_size = Some(snapshot.btc.bid_size);
+    bar.btc_ask_size = Some(snapshot.btc.ask_size);
+    bar.btc_spread_bps = snapshot.btc.spread_bps();
+}
+
 pub struct LiveRunner {
     engine: StrategyEngine,
     price_fetcher: PriceFetcher,
+    book_fetcher: Option<BookFetcher>,
     funding_fetcher: Option<FundingFetcher>,
     account_source: Option<Arc<dyn AccountBalanceSource>>,
     position_source: Option<Arc<dyn AccountPositionSource>>,
@@ -74,6 +88,7 @@ impl LiveRunner {
         Self {
             engine,
             price_fetcher,
+            book_fetcher: None,
             funding_fetcher,
             account_source: None,
             position_source: None,
@@ -97,6 +112,11 @@ impl LiveRunner {
 
     pub fn with_account_source(mut self, source: Arc<dyn AccountBalanceSource>) -> Self {
         self.account_source = Some(source);
+        self
+    }
+
+    pub fn with_book_fetcher(mut self, fetcher: BookFetcher) -> Self {
+        self.book_fetcher = Some(fetcher);
         self
     }
 
@@ -166,11 +186,23 @@ impl LiveRunner {
                 funding_btc,
                 funding_cost_est: None,
                 funding_skip: None,
+                regime_half_life_bars: None,
+                regime_gate_pass: None,
                 expected_edge_bps: None,
                 estimated_cost_bps: None,
                 estimated_net_edge_bps: None,
                 cost_gate_required_net_edge_bps: None,
                 cost_gate_pass: None,
+                eth_best_bid: None,
+                eth_best_ask: None,
+                eth_bid_size: None,
+                eth_ask_size: None,
+                eth_spread_bps: None,
+                btc_best_bid: None,
+                btc_best_ask: None,
+                btc_bid_size: None,
+                btc_ask_size: None,
+                btc_spread_bps: None,
                 entry_block_reason: None,
                 run_error: Some(redact_wallet_addresses(&err.to_string())),
                 unrealized_pnl,
@@ -244,6 +276,18 @@ impl LiveRunner {
             None
         };
 
+        let book_snapshot = if let Some(fetcher) = &self.book_fetcher {
+            match fetcher.fetch_pair_books().await {
+                Ok(snapshot) => Some(snapshot),
+                Err(err) => {
+                    warn!(error = ?err, "order book fetch failed; proceeding without market telemetry");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         if let Some(writer) = &self.price_writer {
             let record = PriceBarRecord {
                 timestamp: snapshot.timestamp,
@@ -303,7 +347,7 @@ impl LiveRunner {
             }
         }
 
-        let outcome = match self.engine.process_bar(bar).await {
+        let mut outcome = match self.engine.process_bar(bar).await {
             Ok(outcome) => outcome,
             Err(err) => {
                 self.record_strategy_failure(
@@ -318,6 +362,9 @@ impl LiveRunner {
                 return Err(RunnerError::Strategy(err));
             }
         };
+        if let Some(snapshot) = book_snapshot.as_ref() {
+            apply_book_snapshot(&mut outcome.bar_log, snapshot);
+        }
         if let Some(writer) = &self.state_writer {
             writer.save(self.engine.state().state()).await?;
         }

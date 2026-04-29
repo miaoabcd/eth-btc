@@ -26,11 +26,23 @@ fn bar_log_contains_required_fields() {
         funding_btc: Some(dec!(0.02)),
         funding_cost_est: Some(dec!(5)),
         funding_skip: Some(false),
+        regime_half_life_bars: Some(12.5),
+        regime_gate_pass: Some(true),
         expected_edge_bps: Some(dec!(12)),
         estimated_cost_bps: Some(dec!(8)),
         estimated_net_edge_bps: Some(dec!(4)),
         cost_gate_required_net_edge_bps: Some(dec!(1)),
         cost_gate_pass: Some(true),
+        eth_best_bid: Some(dec!(99)),
+        eth_best_ask: Some(dec!(101)),
+        eth_bid_size: Some(dec!(2)),
+        eth_ask_size: Some(dec!(3)),
+        eth_spread_bps: Some(dec!(200)),
+        btc_best_bid: Some(dec!(199)),
+        btc_best_ask: Some(dec!(201)),
+        btc_bid_size: Some(dec!(4)),
+        btc_ask_size: Some(dec!(5)),
+        btc_spread_bps: Some(dec!(100)),
         entry_block_reason: Some(EntryBlockReason::NoCross),
         run_error: None,
         unrealized_pnl: dec!(1.23),
@@ -44,6 +56,9 @@ fn bar_log_contains_required_fields() {
     assert!(json.get("eth_price").is_some());
     assert!(json.get("btc_price").is_some());
     assert!(json.get("zscore").is_some());
+    assert!(json.get("regime_half_life_bars").is_some());
+    assert!(json.get("eth_best_bid").is_some());
+    assert!(json.get("btc_spread_bps").is_some());
     assert!(json.get("unrealized_pnl").is_some());
     assert!(json.get("state").is_some());
     assert!(json.get("events").is_some());

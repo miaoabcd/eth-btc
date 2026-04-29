@@ -175,6 +175,29 @@ fn cli_parses_analyze_trades_subcommand() {
         "2026-03-08T00:00:00Z",
         "--format",
         "json",
+        "--regime-study",
+        "--regime-lookback-bars",
+        "4",
+        "--regime-max-half-life-bars",
+        "16",
+        "--regime-sweep",
+        "--regime-sweep-lookbacks",
+        "4,5",
+        "--regime-sweep-entry-zs",
+        "1.0,1.5",
+        "--regime-sweep-half-lives",
+        "8,16",
+        "--regime-sweep-min-trades",
+        "1",
+        "--regime-sweep-top",
+        "6",
+        "--funding-carry-replay",
+        "--funding-carry-min-net-edge-bps",
+        "0.5",
+        "--funding-carry-max-hold-hours",
+        "24",
+        "--funding-carry-interval-hours",
+        "1",
     ])
     .unwrap();
 
@@ -190,6 +213,19 @@ fn cli_parses_analyze_trades_subcommand() {
             );
             assert_eq!(args.since.unwrap(), "2026-03-08T00:00:00Z");
             assert_eq!(args.format, AnalyzeOutputFormat::Json);
+            assert!(args.regime_study);
+            assert_eq!(args.regime_lookback_bars, 4);
+            assert_eq!(args.regime_max_half_life_bars, 16.0);
+            assert!(args.regime_sweep);
+            assert_eq!(args.regime_sweep_lookbacks, "4,5");
+            assert_eq!(args.regime_sweep_entry_zs, "1.0,1.5");
+            assert_eq!(args.regime_sweep_half_lives, "8,16");
+            assert_eq!(args.regime_sweep_min_trades, 1);
+            assert_eq!(args.regime_sweep_top, 6);
+            assert!(args.funding_carry_replay);
+            assert_eq!(args.funding_carry_min_net_edge_bps, dec!(0.5));
+            assert_eq!(args.funding_carry_max_hold_hours, 24);
+            assert_eq!(args.funding_carry_interval_hours, 1);
         }
         other => panic!("unexpected command {other:?}"),
     }

@@ -66,6 +66,31 @@ fn default_cost_gate_is_shadow_safe_and_disabled() {
 }
 
 #[test]
+fn default_regime_gate_is_disabled_but_has_live_candidate_parameters() {
+    let config = get_default_config();
+
+    assert!(!config.regime_gate.enabled);
+    assert_eq!(config.regime_gate.lookback_bars, 28);
+    assert_eq!(config.regime_gate.max_half_life_bars, 40.0);
+}
+
+#[test]
+fn enabled_regime_gate_requires_valid_half_life_window() {
+    let mut config = get_default_config();
+    config.regime_gate.enabled = true;
+    config.regime_gate.lookback_bars = 1;
+
+    let err = config
+        .validate()
+        .expect_err("expected regime gate validation failure");
+    assert!(matches!(
+        err,
+        eth_btc_strategy::config::ConfigError::InvalidValue { field, .. }
+        if field == "regime_gate.lookback_bars"
+    ));
+}
+
+#[test]
 fn cost_gate_bps_values_must_be_non_negative() {
     let mut config = get_default_config();
     config.cost_gate.min_net_edge_bps = dec!(-0.1);

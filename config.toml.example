@@ -78,6 +78,12 @@ spread_bps = 0.5
 long_eth_short_btc_extra_bps = 0.0
 short_eth_long_btc_extra_bps = 0.0
 
+[regime_gate]
+# Optional live half-life gate for fixed ETH/BTC spread entries.
+enabled = false
+lookback_bars = 28
+max_half_life_bars = 40.0
+
 [risk]
 # maximum holding time in hours
 max_hold_hours = 48

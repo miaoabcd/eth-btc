@@ -88,6 +88,32 @@ pub struct AnalyzeTradesArgs {
     pub since: Option<String>,
     #[arg(long, value_enum, default_value_t = AnalyzeOutputFormat::Text)]
     pub format: AnalyzeOutputFormat,
+    #[arg(long)]
+    pub regime_study: bool,
+    #[arg(long, default_value_t = 96, value_name = "BARS")]
+    pub regime_lookback_bars: usize,
+    #[arg(long, default_value_t = 48.0, value_name = "BARS")]
+    pub regime_max_half_life_bars: f64,
+    #[arg(long)]
+    pub regime_sweep: bool,
+    #[arg(long, default_value = "48,96,192,384", value_name = "CSV")]
+    pub regime_sweep_lookbacks: String,
+    #[arg(long, default_value = "1.4,1.8,2.2,2.6,3.0,3.5", value_name = "CSV")]
+    pub regime_sweep_entry_zs: String,
+    #[arg(long, default_value = "8,16,32,48,96", value_name = "CSV")]
+    pub regime_sweep_half_lives: String,
+    #[arg(long, default_value_t = 8, value_name = "COUNT")]
+    pub regime_sweep_min_trades: usize,
+    #[arg(long, default_value_t = 20, value_name = "COUNT")]
+    pub regime_sweep_top: usize,
+    #[arg(long)]
+    pub funding_carry_replay: bool,
+    #[arg(long, default_value = "1.0", value_name = "BPS")]
+    pub funding_carry_min_net_edge_bps: Decimal,
+    #[arg(long, default_value_t = 48, value_name = "HOURS")]
+    pub funding_carry_max_hold_hours: u32,
+    #[arg(long, default_value_t = 1, value_name = "HOURS")]
+    pub funding_carry_interval_hours: u32,
 }
 
 #[derive(Debug, Args)]

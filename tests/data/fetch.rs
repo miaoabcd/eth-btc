@@ -7,8 +7,8 @@ use serde_json::json;
 
 use eth_btc_strategy::config::{PriceField, Symbol};
 use eth_btc_strategy::data::{
-    DataError, HttpClient, HttpResponse, HyperliquidPriceSource, MockPriceSource, PriceBar,
-    PriceFetcher, PriceSource, align_to_bar_close,
+    BookSource, DataError, HttpClient, HttpResponse, HyperliquidPriceSource, MockPriceSource,
+    PriceBar, PriceFetcher, PriceSource, align_to_bar_close,
 };
 use eth_btc_strategy::util::rate_limiter::RateLimiter;
 
@@ -171,6 +171,36 @@ async fn hyperliquid_price_source_handles_rate_limits() {
         .await
         .unwrap_err();
     assert!(matches!(err, DataError::RateLimited));
+}
+
+#[tokio::test]
+async fn hyperliquid_price_source_fetch_book_parses_best_levels() {
+    let client = TestHttpClient {
+        expected_url: "http://localhost/info".to_string(),
+        expected_body: json!({"type": "l2Book", "coin": "ETH"}),
+        response: HttpResponse {
+            status: 200,
+            body: json!({
+                "coin": "ETH",
+                "levels": [
+                    [{"px": "99", "sz": "2", "n": 1}],
+                    [{"px": "101", "sz": "3", "n": 1}]
+                ]
+            })
+            .to_string(),
+        },
+    };
+
+    let source =
+        HyperliquidPriceSource::with_client("http://localhost".to_string(), Arc::new(client));
+    let book = source.fetch_book(Symbol::EthPerp).await.unwrap();
+
+    assert_eq!(book.symbol, Symbol::EthPerp);
+    assert_eq!(book.best_bid, dec!(99));
+    assert_eq!(book.best_ask, dec!(101));
+    assert_eq!(book.bid_size, dec!(2));
+    assert_eq!(book.ask_size, dec!(3));
+    assert_eq!(book.spread_bps(), Some(dec!(200)));
 }
 
 #[tokio::test]

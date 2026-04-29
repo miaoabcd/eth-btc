@@ -3,6 +3,7 @@ use std::str::FromStr;
 
 use chrono::{DateTime, NaiveDateTime, Utc};
 use rust_decimal::Decimal;
+use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
 use serde::Serialize;
 use serde_json::Value;
 use thiserror::Error;
@@ -146,6 +147,76 @@ pub struct StatsReplaySummary {
     negative_bps_abs: Decimal,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct RegimeStudyConfig {
+    pub lookback_bars: usize,
+    pub max_half_life_bars: f64,
+    pub entry_z: Decimal,
+    pub tp_z: Decimal,
+    pub sl_z: Decimal,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RegimeStudyReport {
+    pub rows: usize,
+    pub evaluated_rows: usize,
+    pub lookback_bars: usize,
+    pub max_half_life_bars: f64,
+    pub median_beta: Option<f64>,
+    pub median_fixed_half_life_bars: Option<f64>,
+    pub median_residual_half_life_bars: Option<f64>,
+    pub fixed_regime_counts: BTreeMap<String, usize>,
+    pub residual_regime_counts: BTreeMap<String, usize>,
+    pub candidates: Vec<StatsReplaySummary>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RegimeSweepConfig {
+    pub lookback_bars: Vec<usize>,
+    pub entry_z_values: Vec<Decimal>,
+    pub max_half_life_bars: Vec<f64>,
+    pub tp_z: Decimal,
+    pub sl_z: Decimal,
+    pub min_trades: usize,
+    pub top_n: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RegimeSweepReport {
+    pub rows: usize,
+    pub runs: usize,
+    pub min_trades: usize,
+    pub top_n: usize,
+    pub top_candidates: Vec<RegimeSweepCandidate>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RegimeSweepCandidate {
+    pub name: String,
+    pub lookback_bars: usize,
+    pub entry_z: Decimal,
+    pub max_half_life_bars: Option<f64>,
+    pub trades: usize,
+    pub wins: usize,
+    pub losses: usize,
+    pub total_net_bps: Decimal,
+    pub avg_net_bps: Option<Decimal>,
+    pub win_rate: Option<Decimal>,
+    pub profit_factor: Option<Decimal>,
+    pub exit_reasons: BTreeMap<String, usize>,
+    pub directions: BTreeMap<TradeDirection, ReplayDirectionSummary>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct FundingCarryReplayConfig {
+    pub entry_z: Decimal,
+    pub tp_z: Decimal,
+    pub sl_z: Decimal,
+    pub min_net_edge_bps: Decimal,
+    pub max_hold_hours: u32,
+    pub funding_interval_hours: u32,
+}
+
 #[derive(Debug, Clone)]
 struct TradeHistoryRow {
     timestamp: DateTime<Utc>,
@@ -172,7 +243,52 @@ struct StatsReplayRow {
     zscore: Decimal,
     w_eth: Decimal,
     w_btc: Decimal,
+    funding_eth: Option<Decimal>,
+    funding_btc: Option<Decimal>,
     state: ReplayState,
+}
+
+#[derive(Debug, Clone)]
+struct RegimeStatsRow {
+    eth_price: Decimal,
+    btc_price: Decimal,
+    log_eth: f64,
+    log_btc: f64,
+    fixed_spread: f64,
+    zscore: Decimal,
+    w_eth: Decimal,
+    w_btc: Decimal,
+}
+
+#[derive(Debug, Clone)]
+struct RegimeEvaluatedRow {
+    source: RegimeStatsRow,
+    beta: Option<f64>,
+    fixed_half_life: Option<f64>,
+    residual_zscore: Option<Decimal>,
+    residual_half_life: Option<f64>,
+    residual_w_eth: Option<Decimal>,
+    residual_w_btc: Option<Decimal>,
+    fixed_regime: String,
+    residual_regime: String,
+}
+
+#[derive(Debug, Clone)]
+struct FilteredReplayRow {
+    eth_price: Decimal,
+    btc_price: Decimal,
+    zscore: Decimal,
+    w_eth: Decimal,
+    w_btc: Decimal,
+    entry_allowed: bool,
+}
+
+#[derive(Debug, Clone)]
+struct FilteredOpenPosition {
+    entry_index: usize,
+    entry: FilteredReplayRow,
+    direction: TradeDirection,
+    source: &'static str,
 }
 
 #[derive(Debug, Clone)]
@@ -348,6 +464,306 @@ pub fn format_stats_replay_text(report: &StatsReplayReport) -> String {
             format_count_map(&strategy.entry_sources),
             format_count_map(&strategy.exit_reasons),
             format_replay_directions(&strategy.directions),
+        ));
+    }
+    output
+}
+
+pub fn replay_funding_carry_stats_log(
+    content: &str,
+    since: Option<DateTime<Utc>>,
+    config: &FundingCarryReplayConfig,
+) -> Result<StatsReplayReport, AnalysisError> {
+    let rows = parse_stats_replay_rows(content, since)?;
+    let price_only_config = ReplayStrategyConfig {
+        name: "funding_price_only".to_string(),
+        entry_z: config.entry_z,
+        tp_z: config.tp_z,
+        sl_z: config.sl_z,
+        cooldown_recovery: false,
+        cooldown_recovery_bars: 0,
+    };
+    let strategies = vec![
+        replay_strategy(&rows, &price_only_config),
+        replay_funding_carry_strategy("funding_signed_carry", &rows, config, false),
+        replay_funding_carry_strategy("funding_carry_gate", &rows, config, true),
+    ];
+    Ok(StatsReplayReport {
+        rows: rows.len(),
+        strategies,
+    })
+}
+
+pub fn format_funding_carry_replay_text(report: &StatsReplayReport) -> String {
+    let mut output = String::new();
+    output.push_str("funding carry replay\n");
+    output.push_str(
+        "name trades wins losses net_bps avg_bps win_rate profit_factor sources exits directions\n",
+    );
+    for strategy in &report.strategies {
+        output.push_str(&format!(
+            "{} {} {} {} {} {} {} {} {} {} {}\n",
+            strategy.name,
+            strategy.trades,
+            strategy.wins,
+            strategy.losses,
+            strategy.total_net_bps,
+            fmt_optional(strategy.avg_net_bps),
+            fmt_optional(strategy.win_rate),
+            fmt_optional(strategy.profit_factor),
+            format_count_map(&strategy.entry_sources),
+            format_count_map(&strategy.exit_reasons),
+            format_replay_directions(&strategy.directions),
+        ));
+    }
+    output
+}
+
+pub fn study_residual_regimes(
+    content: &str,
+    since: Option<DateTime<Utc>>,
+    config: &RegimeStudyConfig,
+) -> Result<RegimeStudyReport, AnalysisError> {
+    let rows = parse_stats_regime_rows(content, since)?;
+    let evaluated = evaluate_regime_rows(&rows, config.lookback_bars);
+    let fixed_rows = build_fixed_regime_replay_rows(&evaluated, false, config);
+    let fixed_half_life_rows = build_fixed_regime_replay_rows(&evaluated, true, config);
+    let residual_rows = build_residual_regime_replay_rows(&evaluated, false, config);
+    let residual_half_life_rows = build_residual_regime_replay_rows(&evaluated, true, config);
+    let fixed_regime_counts = count_regimes(&evaluated, |row| row.fixed_regime.as_str());
+    let residual_regime_counts = count_regimes(&evaluated, |row| row.residual_regime.as_str());
+    let candidates = vec![
+        replay_filtered_strategy(
+            "fixed_spread_baseline".to_string(),
+            &fixed_rows,
+            config.entry_z,
+            config.tp_z,
+            config.sl_z,
+        ),
+        replay_filtered_strategy(
+            "fixed_spread_half_life".to_string(),
+            &fixed_half_life_rows,
+            config.entry_z,
+            config.tp_z,
+            config.sl_z,
+        ),
+        replay_filtered_strategy(
+            "rolling_beta_residual".to_string(),
+            &residual_rows,
+            config.entry_z,
+            config.tp_z,
+            config.sl_z,
+        ),
+        replay_filtered_strategy(
+            "rolling_beta_residual_half_life".to_string(),
+            &residual_half_life_rows,
+            config.entry_z,
+            config.tp_z,
+            config.sl_z,
+        ),
+    ];
+
+    Ok(RegimeStudyReport {
+        rows: rows.len(),
+        evaluated_rows: evaluated.len(),
+        lookback_bars: config.lookback_bars,
+        max_half_life_bars: config.max_half_life_bars,
+        median_beta: median(evaluated.iter().filter_map(|row| row.beta).collect()),
+        median_fixed_half_life_bars: median(
+            evaluated
+                .iter()
+                .filter_map(|row| row.fixed_half_life)
+                .collect(),
+        ),
+        median_residual_half_life_bars: median(
+            evaluated
+                .iter()
+                .filter_map(|row| row.residual_half_life)
+                .collect(),
+        ),
+        fixed_regime_counts,
+        residual_regime_counts,
+        candidates,
+    })
+}
+
+pub fn format_regime_study_text(report: &RegimeStudyReport) -> String {
+    let mut output = String::new();
+    output.push_str("residual regime study\n");
+    output.push_str(&format!(
+        "rows={} evaluated_rows={} lookback_bars={} max_half_life_bars={} median_beta={} median_fixed_half_life_bars={} median_residual_half_life_bars={} fixed_regimes={} residual_regimes={}\n",
+        report.rows,
+        report.evaluated_rows,
+        report.lookback_bars,
+        report.max_half_life_bars,
+        fmt_optional_f64(report.median_beta),
+        fmt_optional_f64(report.median_fixed_half_life_bars),
+        fmt_optional_f64(report.median_residual_half_life_bars),
+        format_count_map(&report.fixed_regime_counts),
+        format_count_map(&report.residual_regime_counts),
+    ));
+    output.push_str(
+        "name trades wins losses net_bps avg_bps win_rate profit_factor sources exits directions\n",
+    );
+    for candidate in &report.candidates {
+        output.push_str(&format!(
+            "{} {} {} {} {} {} {} {} {} {} {}\n",
+            candidate.name,
+            candidate.trades,
+            candidate.wins,
+            candidate.losses,
+            candidate.total_net_bps,
+            fmt_optional(candidate.avg_net_bps),
+            fmt_optional(candidate.win_rate),
+            fmt_optional(candidate.profit_factor),
+            format_count_map(&candidate.entry_sources),
+            format_count_map(&candidate.exit_reasons),
+            format_replay_directions(&candidate.directions),
+        ));
+    }
+    output
+}
+
+pub fn sweep_residual_regime_parameters(
+    content: &str,
+    since: Option<DateTime<Utc>>,
+    config: &RegimeSweepConfig,
+) -> Result<RegimeSweepReport, AnalysisError> {
+    let rows = parse_stats_regime_rows(content, since)?;
+    let mut candidates = Vec::new();
+    let mut runs = 0;
+
+    for &lookback_bars in &config.lookback_bars {
+        let evaluated = evaluate_regime_rows(&rows, lookback_bars);
+        for &entry_z in &config.entry_z_values {
+            let base_config = RegimeStudyConfig {
+                lookback_bars,
+                max_half_life_bars: f64::INFINITY,
+                entry_z,
+                tp_z: config.tp_z,
+                sl_z: config.sl_z,
+            };
+            let fixed_rows = build_fixed_regime_replay_rows(&evaluated, false, &base_config);
+            let residual_rows = build_residual_regime_replay_rows(&evaluated, false, &base_config);
+            runs += 2;
+            push_sweep_candidate(
+                &mut candidates,
+                replay_filtered_strategy(
+                    "fixed_spread_baseline".to_string(),
+                    &fixed_rows,
+                    entry_z,
+                    config.tp_z,
+                    config.sl_z,
+                ),
+                lookback_bars,
+                entry_z,
+                None,
+                config.min_trades,
+            );
+            push_sweep_candidate(
+                &mut candidates,
+                replay_filtered_strategy(
+                    "rolling_beta_residual".to_string(),
+                    &residual_rows,
+                    entry_z,
+                    config.tp_z,
+                    config.sl_z,
+                ),
+                lookback_bars,
+                entry_z,
+                None,
+                config.min_trades,
+            );
+
+            for &max_half_life_bars in &config.max_half_life_bars {
+                let half_life_config = RegimeStudyConfig {
+                    lookback_bars,
+                    max_half_life_bars,
+                    entry_z,
+                    tp_z: config.tp_z,
+                    sl_z: config.sl_z,
+                };
+                let fixed_half_life_rows =
+                    build_fixed_regime_replay_rows(&evaluated, true, &half_life_config);
+                let residual_half_life_rows =
+                    build_residual_regime_replay_rows(&evaluated, true, &half_life_config);
+                runs += 2;
+                push_sweep_candidate(
+                    &mut candidates,
+                    replay_filtered_strategy(
+                        "fixed_spread_half_life".to_string(),
+                        &fixed_half_life_rows,
+                        entry_z,
+                        config.tp_z,
+                        config.sl_z,
+                    ),
+                    lookback_bars,
+                    entry_z,
+                    Some(max_half_life_bars),
+                    config.min_trades,
+                );
+                push_sweep_candidate(
+                    &mut candidates,
+                    replay_filtered_strategy(
+                        "rolling_beta_residual_half_life".to_string(),
+                        &residual_half_life_rows,
+                        entry_z,
+                        config.tp_z,
+                        config.sl_z,
+                    ),
+                    lookback_bars,
+                    entry_z,
+                    Some(max_half_life_bars),
+                    config.min_trades,
+                );
+            }
+        }
+    }
+
+    candidates.sort_by(|left, right| {
+        right
+            .total_net_bps
+            .cmp(&left.total_net_bps)
+            .then_with(|| right.trades.cmp(&left.trades))
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    candidates.truncate(config.top_n);
+
+    Ok(RegimeSweepReport {
+        rows: rows.len(),
+        runs,
+        min_trades: config.min_trades,
+        top_n: config.top_n,
+        top_candidates: candidates,
+    })
+}
+
+pub fn format_regime_sweep_text(report: &RegimeSweepReport) -> String {
+    let mut output = String::new();
+    output.push_str("regime parameter sweep\n");
+    output.push_str(&format!(
+        "rows={} runs={} min_trades={} top_n={}\n",
+        report.rows, report.runs, report.min_trades, report.top_n
+    ));
+    output.push_str(
+        "name lookback entry_z max_half_life trades wins losses net_bps avg_bps win_rate profit_factor exits directions\n",
+    );
+    for candidate in &report.top_candidates {
+        output.push_str(&format!(
+            "{} {} {} {} {} {} {} {} {} {} {} {} {}\n",
+            candidate.name,
+            candidate.lookback_bars,
+            candidate.entry_z,
+            fmt_optional_f64(candidate.max_half_life_bars),
+            candidate.trades,
+            candidate.wins,
+            candidate.losses,
+            candidate.total_net_bps,
+            fmt_optional(candidate.avg_net_bps),
+            fmt_optional(candidate.win_rate),
+            fmt_optional(candidate.profit_factor),
+            format_count_map(&candidate.exit_reasons),
+            format_replay_directions(&candidate.directions),
         ));
     }
     output
@@ -591,6 +1007,12 @@ fn fmt_optional(value: Option<Decimal>) -> String {
         .unwrap_or_else(|| "n/a".to_string())
 }
 
+fn fmt_optional_f64(value: Option<f64>) -> String {
+    value
+        .map(|value| format!("{value:.4}"))
+        .unwrap_or_else(|| "n/a".to_string())
+}
+
 fn format_count_map(map: &BTreeMap<String, usize>) -> String {
     if map.is_empty() {
         return "none".to_string();
@@ -614,6 +1036,172 @@ fn format_replay_directions(map: &BTreeMap<TradeDirection, ReplayDirectionSummar
         })
         .collect::<Vec<_>>()
         .join(",")
+}
+
+fn count_regimes(
+    rows: &[RegimeEvaluatedRow],
+    selector: impl Fn(&RegimeEvaluatedRow) -> &str,
+) -> BTreeMap<String, usize> {
+    let mut counts = BTreeMap::new();
+    for row in rows {
+        *counts.entry(selector(row).to_string()).or_insert(0) += 1;
+    }
+    counts
+}
+
+fn push_sweep_candidate(
+    candidates: &mut Vec<RegimeSweepCandidate>,
+    summary: StatsReplaySummary,
+    lookback_bars: usize,
+    entry_z: Decimal,
+    max_half_life_bars: Option<f64>,
+    min_trades: usize,
+) {
+    if summary.trades < min_trades {
+        return;
+    }
+    candidates.push(RegimeSweepCandidate {
+        name: summary.name,
+        lookback_bars,
+        entry_z,
+        max_half_life_bars,
+        trades: summary.trades,
+        wins: summary.wins,
+        losses: summary.losses,
+        total_net_bps: summary.total_net_bps,
+        avg_net_bps: summary.avg_net_bps,
+        win_rate: summary.win_rate,
+        profit_factor: summary.profit_factor,
+        exit_reasons: summary.exit_reasons,
+        directions: summary.directions,
+    });
+}
+
+fn decimal_to_positive_f64(
+    value: Decimal,
+    field: &'static str,
+    line: usize,
+) -> Result<f64, AnalysisError> {
+    let value = value
+        .to_f64()
+        .ok_or_else(|| AnalysisError::InvalidStatsLog {
+            line,
+            message: format!("{field} cannot be represented as f64"),
+        })?;
+    if value.is_finite() && value > 0.0 {
+        Ok(value)
+    } else {
+        Err(AnalysisError::InvalidStatsLog {
+            line,
+            message: format!("{field} must be positive, got {value}"),
+        })
+    }
+}
+
+fn decimal_from_f64_for_analysis(value: f64) -> Option<Decimal> {
+    if value.is_finite() {
+        Decimal::from_f64(value)
+    } else {
+        None
+    }
+}
+
+fn standard_score(value: f64, sample: &[f64]) -> Option<f64> {
+    let mean = mean(sample)?;
+    let variance = sample
+        .iter()
+        .map(|item| {
+            let diff = item - mean;
+            diff * diff
+        })
+        .sum::<f64>()
+        / sample.len() as f64;
+    let stddev = variance.sqrt();
+    if stddev.is_finite() && stddev > 1e-12 {
+        Some((value - mean) / stddev)
+    } else {
+        None
+    }
+}
+
+fn estimate_half_life_bars(series: &[f64]) -> Option<f64> {
+    if series.len() < 3 {
+        return None;
+    }
+    let lagged = series[..series.len() - 1].to_vec();
+    let deltas = series
+        .windows(2)
+        .map(|pair| pair[1] - pair[0])
+        .collect::<Vec<_>>();
+    let (_, slope) = ols_alpha_beta(&lagged, &deltas)?;
+    if slope < 0.0 {
+        let half_life = -std::f64::consts::LN_2 / slope;
+        if half_life.is_finite() && half_life > 0.0 {
+            return Some(half_life);
+        }
+    }
+    None
+}
+
+fn ols_alpha_beta(x: &[f64], y: &[f64]) -> Option<(f64, f64)> {
+    if x.len() != y.len() || x.len() < 2 {
+        return None;
+    }
+    let x_mean = mean(x)?;
+    let y_mean = mean(y)?;
+    let mut cov = 0.0;
+    let mut var = 0.0;
+    for (x_value, y_value) in x.iter().zip(y.iter()) {
+        let x_diff = x_value - x_mean;
+        cov += x_diff * (y_value - y_mean);
+        var += x_diff * x_diff;
+    }
+    if !var.is_finite() || var <= 1e-18 {
+        return None;
+    }
+    let beta = cov / var;
+    let alpha = y_mean - beta * x_mean;
+    if alpha.is_finite() && beta.is_finite() {
+        Some((alpha, beta))
+    } else {
+        None
+    }
+}
+
+fn mean(values: &[f64]) -> Option<f64> {
+    if values.is_empty() {
+        return None;
+    }
+    let mean = values.iter().sum::<f64>() / values.len() as f64;
+    mean.is_finite().then_some(mean)
+}
+
+fn median(mut values: Vec<f64>) -> Option<f64> {
+    values.retain(|value| value.is_finite());
+    if values.is_empty() {
+        return None;
+    }
+    values.sort_by(f64::total_cmp);
+    let middle = values.len() / 2;
+    if values.len() % 2 == 0 {
+        Some((values[middle - 1] + values[middle]) / 2.0)
+    } else {
+        Some(values[middle])
+    }
+}
+
+fn classify_half_life_regime(half_life: Option<f64>) -> String {
+    match half_life {
+        Some(value) if value <= 16.0 => "fast".to_string(),
+        Some(value) if value <= 48.0 => "medium".to_string(),
+        Some(value) if value <= 96.0 => "slow".to_string(),
+        Some(_) => "too_slow".to_string(),
+        None => "non_reverting".to_string(),
+    }
+}
+
+fn half_life_allowed(half_life: Option<f64>, max_half_life_bars: f64) -> bool {
+    half_life.is_some_and(|value| value <= max_half_life_bars)
 }
 
 const REPLAY_MAX_HOLD_BARS: usize = 48 * 4;
@@ -676,6 +1264,8 @@ fn parse_stats_replay_row(
         optional_decimal_field(payload, "w_eth", line)?.unwrap_or_else(|| Decimal::new(5, 1));
     let w_btc =
         optional_decimal_field(payload, "w_btc", line)?.unwrap_or_else(|| Decimal::new(5, 1));
+    let funding_eth = optional_decimal_field(payload, "funding_eth", line)?;
+    let funding_btc = optional_decimal_field(payload, "funding_btc", line)?;
     let state = parse_replay_state(payload.get("state"));
 
     Ok(Some(StatsReplayRow {
@@ -685,8 +1275,52 @@ fn parse_stats_replay_row(
         zscore,
         w_eth,
         w_btc,
+        funding_eth,
+        funding_btc,
         state,
     }))
+}
+
+fn parse_stats_regime_rows(
+    content: &str,
+    since: Option<DateTime<Utc>>,
+) -> Result<Vec<RegimeStatsRow>, AnalysisError> {
+    let mut rows_by_timestamp = BTreeMap::new();
+    for (idx, line) in content.lines().enumerate() {
+        let line_number = idx + 1;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let payload: Value =
+            serde_json::from_str(line).map_err(|err| AnalysisError::InvalidStatsLog {
+                line: line_number,
+                message: err.to_string(),
+            })?;
+        let Some(row) = parse_stats_replay_row(line_number, &payload)? else {
+            continue;
+        };
+        if since.map(|since| row.timestamp < since).unwrap_or(false) {
+            continue;
+        }
+        let eth_price = decimal_to_positive_f64(row.eth_price, "eth_price", line_number)?;
+        let btc_price = decimal_to_positive_f64(row.btc_price, "btc_price", line_number)?;
+        let log_eth = eth_price.ln();
+        let log_btc = btc_price.ln();
+        rows_by_timestamp.insert(
+            row.timestamp,
+            RegimeStatsRow {
+                eth_price: row.eth_price,
+                btc_price: row.btc_price,
+                log_eth,
+                log_btc,
+                fixed_spread: log_eth - log_btc,
+                zscore: row.zscore,
+                w_eth: row.w_eth,
+                w_btc: row.w_btc,
+            },
+        );
+    }
+    Ok(rows_by_timestamp.into_values().collect())
 }
 
 fn parse_rfc3339_stats_timestamp(line: usize, value: &str) -> Result<DateTime<Utc>, AnalysisError> {
@@ -733,6 +1367,211 @@ fn parse_replay_state(value: Option<&Value>) -> ReplayState {
         Some("Cooldown") => ReplayState::Cooldown,
         _ => ReplayState::Other,
     }
+}
+
+fn evaluate_regime_rows(rows: &[RegimeStatsRow], lookback_bars: usize) -> Vec<RegimeEvaluatedRow> {
+    if lookback_bars < 3 || rows.len() <= lookback_bars {
+        return Vec::new();
+    }
+    let mut evaluated = Vec::with_capacity(rows.len().saturating_sub(lookback_bars));
+    for idx in lookback_bars..rows.len() {
+        let window = &rows[idx - lookback_bars..idx];
+        let source = rows[idx].clone();
+        let fixed_series = window
+            .iter()
+            .map(|row| row.fixed_spread)
+            .collect::<Vec<_>>();
+        let fixed_half_life = estimate_half_life_bars(&fixed_series);
+        let regression = ols_alpha_beta(
+            &window.iter().map(|row| row.log_btc).collect::<Vec<_>>(),
+            &window.iter().map(|row| row.log_eth).collect::<Vec<_>>(),
+        );
+        let (beta, residual_zscore, residual_half_life, residual_w_eth, residual_w_btc) =
+            if let Some((alpha, beta)) = regression {
+                let residuals = window
+                    .iter()
+                    .map(|row| row.log_eth - (alpha + beta * row.log_btc))
+                    .collect::<Vec<_>>();
+                let current_residual = source.log_eth - (alpha + beta * source.log_btc);
+                let residual_zscore = standard_score(current_residual, &residuals)
+                    .and_then(decimal_from_f64_for_analysis);
+                let residual_half_life = estimate_half_life_bars(&residuals);
+                let hedge_weight = beta.abs();
+                let (residual_w_eth, residual_w_btc) =
+                    if hedge_weight.is_finite() && hedge_weight > 0.0 {
+                        (
+                            decimal_from_f64_for_analysis(1.0 / (1.0 + hedge_weight)),
+                            decimal_from_f64_for_analysis(hedge_weight / (1.0 + hedge_weight)),
+                        )
+                    } else {
+                        (None, None)
+                    };
+                (
+                    Some(beta),
+                    residual_zscore,
+                    residual_half_life,
+                    residual_w_eth,
+                    residual_w_btc,
+                )
+            } else {
+                (None, None, None, None, None)
+            };
+        let fixed_regime = classify_half_life_regime(fixed_half_life);
+        let residual_regime = classify_half_life_regime(residual_half_life);
+        evaluated.push(RegimeEvaluatedRow {
+            source,
+            beta,
+            fixed_half_life,
+            residual_zscore,
+            residual_half_life,
+            residual_w_eth,
+            residual_w_btc,
+            fixed_regime,
+            residual_regime,
+        });
+    }
+    evaluated
+}
+
+fn build_fixed_regime_replay_rows(
+    rows: &[RegimeEvaluatedRow],
+    use_half_life_filter: bool,
+    config: &RegimeStudyConfig,
+) -> Vec<FilteredReplayRow> {
+    rows.iter()
+        .map(|row| FilteredReplayRow {
+            eth_price: row.source.eth_price,
+            btc_price: row.source.btc_price,
+            zscore: row.source.zscore,
+            w_eth: row.source.w_eth,
+            w_btc: row.source.w_btc,
+            entry_allowed: !use_half_life_filter
+                || half_life_allowed(row.fixed_half_life, config.max_half_life_bars),
+        })
+        .collect()
+}
+
+fn build_residual_regime_replay_rows(
+    rows: &[RegimeEvaluatedRow],
+    use_half_life_filter: bool,
+    config: &RegimeStudyConfig,
+) -> Vec<FilteredReplayRow> {
+    rows.iter()
+        .filter_map(|row| {
+            let zscore = row.residual_zscore?;
+            let w_eth = row.residual_w_eth?;
+            let w_btc = row.residual_w_btc?;
+            Some(FilteredReplayRow {
+                eth_price: row.source.eth_price,
+                btc_price: row.source.btc_price,
+                zscore,
+                w_eth,
+                w_btc,
+                entry_allowed: !use_half_life_filter
+                    || half_life_allowed(row.residual_half_life, config.max_half_life_bars),
+            })
+        })
+        .collect()
+}
+
+fn replay_filtered_strategy(
+    name: String,
+    rows: &[FilteredReplayRow],
+    entry_z: Decimal,
+    tp_z: Decimal,
+    sl_z: Decimal,
+) -> StatsReplaySummary {
+    let mut position: Option<FilteredOpenPosition> = None;
+    let mut trades = Vec::new();
+    let mut prev_z = None;
+    let mut cooldown_until = None;
+
+    for (idx, row) in rows.iter().enumerate() {
+        let mut just_exited_stop = false;
+        if let Some(open) = position.as_ref()
+            && let Some(reason) = filtered_replay_exit_reason(open, row, idx, tp_z, sl_z)
+        {
+            trades.push(ReplayTrade {
+                direction: open.direction,
+                source: open.source,
+                exit_reason: reason,
+                net_bps: filtered_replay_trade_net_bps(open, row),
+            });
+            position = None;
+            if reason == "SL" {
+                cooldown_until = Some(idx + REPLAY_COOLDOWN_BARS);
+                just_exited_stop = true;
+            }
+        }
+
+        let cooldown_active = if let Some(until) = cooldown_until {
+            if idx < until {
+                true
+            } else {
+                cooldown_until = None;
+                false
+            }
+        } else {
+            false
+        };
+        let abs_z = row.zscore.abs();
+        let crossed = prev_z
+            .is_some_and(|prev: Decimal| prev.abs() < entry_z && abs_z >= entry_z && abs_z < sl_z);
+        if position.is_none()
+            && !cooldown_active
+            && !just_exited_stop
+            && row.entry_allowed
+            && crossed
+        {
+            position = Some(FilteredOpenPosition {
+                entry_index: idx,
+                entry: row.clone(),
+                direction: if row.zscore >= Decimal::ZERO {
+                    TradeDirection::ShortEthLongBtc
+                } else {
+                    TradeDirection::LongEthShortBtc
+                },
+                source: "cross",
+            });
+        }
+
+        prev_z = Some(row.zscore);
+    }
+
+    summarize_replay_trades(name, &trades)
+}
+
+fn filtered_replay_exit_reason(
+    open: &FilteredOpenPosition,
+    row: &FilteredReplayRow,
+    idx: usize,
+    tp_z: Decimal,
+    sl_z: Decimal,
+) -> Option<&'static str> {
+    let abs_z = row.zscore.abs();
+    if abs_z <= tp_z {
+        Some("TP")
+    } else if abs_z >= sl_z {
+        Some("SL")
+    } else if idx.saturating_sub(open.entry_index) >= REPLAY_MAX_HOLD_BARS {
+        Some("TIME")
+    } else {
+        None
+    }
+}
+
+fn filtered_replay_trade_net_bps(open: &FilteredOpenPosition, exit: &FilteredReplayRow) -> Decimal {
+    let eth_return = exit.eth_price / open.entry.eth_price - Decimal::ONE;
+    let btc_return = exit.btc_price / open.entry.btc_price - Decimal::ONE;
+    let gross = match open.direction {
+        TradeDirection::LongEthShortBtc => {
+            open.entry.w_eth * eth_return - open.entry.w_btc * btc_return
+        }
+        TradeDirection::ShortEthLongBtc => {
+            -open.entry.w_eth * eth_return + open.entry.w_btc * btc_return
+        }
+    };
+    gross * Decimal::from(10_000u32) - replay_cost_bps()
 }
 
 fn replay_strategy(rows: &[StatsReplayRow], config: &ReplayStrategyConfig) -> StatsReplaySummary {
@@ -826,6 +1665,100 @@ fn replay_strategy(rows: &[StatsReplayRow], config: &ReplayStrategyConfig) -> St
     summarize_replay_trades(config.name.clone(), &trades)
 }
 
+fn replay_funding_carry_strategy(
+    name: &str,
+    rows: &[StatsReplayRow],
+    config: &FundingCarryReplayConfig,
+    enforce_gate: bool,
+) -> StatsReplaySummary {
+    let mut position: Option<ReplayOpenPosition> = None;
+    let mut trades = Vec::new();
+    let mut prev_z = None;
+    let mut cooldown_until = None;
+
+    for (idx, row) in rows.iter().enumerate() {
+        let mut just_exited_stop = false;
+        if let Some(open) = position.as_ref()
+            && let Some(reason) = replay_exit_reason(
+                open,
+                row,
+                idx,
+                &ReplayStrategyConfig {
+                    name: name.to_string(),
+                    entry_z: config.entry_z,
+                    tp_z: config.tp_z,
+                    sl_z: config.sl_z,
+                    cooldown_recovery: false,
+                    cooldown_recovery_bars: 0,
+                },
+            )
+        {
+            trades.push(ReplayTrade {
+                direction: open.direction,
+                source: open.source,
+                exit_reason: reason,
+                net_bps: replay_trade_net_bps(open, row)
+                    + funding_carry_bps(
+                        &open.entry,
+                        open.direction,
+                        idx.saturating_sub(open.entry_index),
+                        config.funding_interval_hours,
+                    ),
+            });
+            position = None;
+            if reason == "SL" {
+                cooldown_until = Some(idx + REPLAY_COOLDOWN_BARS);
+                just_exited_stop = true;
+            }
+        }
+
+        let cooldown_active = if let Some(until) = cooldown_until {
+            if idx < until {
+                true
+            } else {
+                cooldown_until = None;
+                false
+            }
+        } else {
+            false
+        };
+        let abs_z = row.zscore.abs();
+        let crossed = prev_z.is_some_and(|prev: Decimal| {
+            prev.abs() < config.entry_z && abs_z >= config.entry_z && abs_z < config.sl_z
+        });
+        if position.is_none() && !cooldown_active && !just_exited_stop && crossed {
+            let direction = if row.zscore >= Decimal::ZERO {
+                TradeDirection::ShortEthLongBtc
+            } else {
+                TradeDirection::LongEthShortBtc
+            };
+            let carry_gate_pass = !enforce_gate
+                || funding_carry_bps_for_hours(
+                    row,
+                    direction,
+                    config.max_hold_hours,
+                    config.funding_interval_hours,
+                ) >= config.min_net_edge_bps;
+            if carry_gate_pass {
+                position = Some(ReplayOpenPosition {
+                    entry_index: idx,
+                    entry: row.clone(),
+                    direction,
+                    source: if enforce_gate {
+                        "funding_carry_gate"
+                    } else {
+                        "cross"
+                    },
+                });
+            }
+        }
+
+        prev_z = Some(row.zscore);
+    }
+
+    summarize_replay_trades(name.to_string(), &trades)
+}
+
 fn replay_exit_reason(
     open: &ReplayOpenPosition,
     row: &StatsReplayRow,
@@ -842,6 +1775,57 @@ fn replay_exit_reason(
     } else {
         None
     }
+}
+
+fn funding_carry_bps(
+    entry: &StatsReplayRow,
+    direction: TradeDirection,
+    holding_bars: usize,
+    funding_interval_hours: u32,
+) -> Decimal {
+    if funding_interval_hours == 0 {
+        return Decimal::ZERO;
+    }
+    let holding_minutes = Decimal::from(holding_bars as u64) * Decimal::from(15u32);
+    let holding_hours = holding_minutes / Decimal::from(60u32);
+    funding_carry_bps_for_decimal_hours(entry, direction, holding_hours, funding_interval_hours)
+}
+
+fn funding_carry_bps_for_hours(
+    entry: &StatsReplayRow,
+    direction: TradeDirection,
+    holding_hours: u32,
+    funding_interval_hours: u32,
+) -> Decimal {
+    funding_carry_bps_for_decimal_hours(
+        entry,
+        direction,
+        Decimal::from(holding_hours),
+        funding_interval_hours,
+    )
+}
+
+fn funding_carry_bps_for_decimal_hours(
+    entry: &StatsReplayRow,
+    direction: TradeDirection,
+    holding_hours: Decimal,
+    funding_interval_hours: u32,
+) -> Decimal {
+    if funding_interval_hours == 0 {
+        return Decimal::ZERO;
+    }
+    let Some(funding_eth) = entry.funding_eth else {
+        return Decimal::ZERO;
+    };
+    let Some(funding_btc) = entry.funding_btc else {
+        return Decimal::ZERO;
+    };
+    let per_interval_cost = match direction {
+        TradeDirection::LongEthShortBtc => funding_eth * entry.w_eth - funding_btc * entry.w_btc,
+        TradeDirection::ShortEthLongBtc => -funding_eth * entry.w_eth + funding_btc * entry.w_btc,
+    };
+    let intervals = holding_hours / Decimal::from(funding_interval_hours);
+    -per_interval_cost * intervals * Decimal::from(10_000u32)
 }
 
 fn replay_trade_net_bps(open: &ReplayOpenPosition, exit: &StatsReplayRow) -> Decimal {

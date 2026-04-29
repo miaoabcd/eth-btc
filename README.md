@@ -39,6 +39,7 @@ Key behaviors:
 - `funding.modes = ["THRESHOLD"]` is now enforced in entry gating: effective entry threshold becomes `entry_z + k * normalized_funding_cost`.
 - `funding.funding_cost_threshold` is denominated in estimated quote-currency cost for the configured position size, not bps.
 - `[cost_gate]` can compute cost-aware entry diagnostics in shadow mode and, when `enforce = true`, block entries whose estimated net edge is below `min_net_edge_bps`.
+- `[regime_gate]` can enforce a rolling fixed-spread half-life filter before submitting live entries.
 - `[stale_cross]` is an optional guarded recovery path for missed crossing signals after a stop-loss cooldown releases; it only fires inside a short recovery window when z-score is still in the entry band and is reverting.
 - `runtime.once = true` runs one cycle and exits (useful for cron scheduling).
 - `execution.order_type = "POST_ONLY"` enables passive maker-style entry orders. If both legs rest successfully, the strategy enters a local `PendingEntry` state and waits for the next reconciliation cycle to confirm the actual fill.
@@ -47,8 +48,8 @@ Key behaviors:
 
 Statistics log:
 
-- `[logging].stats_path` writes one record per 15m bar (r/mu/sigma/sigma_eff/zscore, weights, notional, funding fields, cost-gate fields, state, `unrealized_pnl`).
-- `[logging].trade_path` writes per-entry/per-exit records (`realized_pnl`, `cumulative_realized_pnl`, `fee`, `exchange_closed_pnl`, `pnl_source`).
+- `[logging].stats_path` writes one record per 15m bar (r/mu/sigma/sigma_eff/zscore, weights, notional, funding fields, regime/cost-gate fields, order-book best bid/ask/spread fields, state, `unrealized_pnl`).
+- `[logging].trade_path` writes per-entry/per-exit records (`realized_pnl`, `cumulative_realized_pnl`, `fee`, `exchange_closed_pnl`, `pnl_source`, reference prices, and slippage bps).
 - In live mode, trade PnL is reconciled from Hyperliquid fills by order id when available: `realized_pnl = closedPnl - fee`, matching the net fill-history/exported trade-history basis. If fills cannot be fetched or matched, the record falls back to `MODEL_ESTIMATE`.
 - If `[logging].price_db_path` points to `.sqlite`, fetched bars are persisted to SQLite (`price_bars`) and can be reused by backtest.
 - For maker entry diagnostics, stats records now distinguish "no signal" from "signal blocked" cases via `entry_block_reason`, and `trade_path` records `EntrySubmitted` before a passive order becomes a live position.
@@ -72,10 +73,13 @@ Trade-history attribution:
 cargo run --bin eth_btc_strategy -- analyze-trades \
   --trade-history data/trade_history.csv \
   --stats-log data/logs/stats.log \
-  --since 2026-03-08T00:00:00Z
+  --since 2026-03-08T00:00:00Z \
+  --regime-study \
+  --regime-sweep \
+  --funding-carry-replay
 ```
 
-This reconstructs flat-to-flat cycles and reports paired vs single-leg PnL, fees, net/gross edge bps, direction splits, and optional stats-log candidate replay results.
+This reconstructs flat-to-flat cycles and reports paired vs single-leg PnL, fees, net/gross edge bps, direction splits, optional stats-log candidate replay results, and optional residual regime research. `--regime-study` compares fixed-spread entries, half-life filtered entries, rolling-beta residual entries, and rolling-beta residual entries with a half-life filter. `--regime-sweep` scans lookback, entry-z, and half-life grids to rank candidate parameter sets. `--funding-carry-replay` compares price-only replay with signed funding-carry variants.
 
 See `config.toml.example` for all available settings.
 
@@ -187,6 +191,19 @@ short_eth_long_btc_extra_bps = 2.0
 ```
 
 When enabled, stats logs include `expected_edge_bps`, `estimated_cost_bps`, `estimated_net_edge_bps`, `cost_gate_required_net_edge_bps`, and `cost_gate_pass`. Set `enforce = true` only after reviewing the shadow distribution.
+
+### Regime Gate
+
+Use the half-life gate to block entries when the fixed ETH/BTC spread is not reverting quickly enough:
+
+```toml
+[regime_gate]
+enabled = true
+lookback_bars = 28
+max_half_life_bars = 40.0
+```
+
+Stats logs include `regime_half_life_bars` and `regime_gate_pass`. If enabled and the half-life is unavailable or above the configured maximum, the entry is blocked with `entry_block_reason = "REGIME_GATE"`.
 
 ### Order test (single IOC order)
 
