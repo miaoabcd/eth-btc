@@ -10,6 +10,7 @@ use serde_json::Value;
 use thiserror::Error;
 
 use crate::config::Symbol;
+use crate::util::http::{HyperliquidHttpTimeouts, hyperliquid_reqwest_client};
 use crate::util::rate_limiter::{FixedRateLimiter, RateLimiter};
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -89,13 +90,23 @@ pub trait AccountHttpClient: Send + Sync {
 #[derive(Clone)]
 pub struct ReqwestAccountClient {
     client: reqwest::Client,
+    timeouts: HyperliquidHttpTimeouts,
 }
 
 impl ReqwestAccountClient {
     pub fn new() -> Self {
+        Self::with_timeouts(HyperliquidHttpTimeouts::from_env())
+    }
+
+    pub fn with_timeouts(timeouts: HyperliquidHttpTimeouts) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: hyperliquid_reqwest_client(timeouts),
+            timeouts,
         }
+    }
+
+    pub fn timeout_settings(&self) -> HyperliquidHttpTimeouts {
+        self.timeouts
     }
 }
 

@@ -10,6 +10,7 @@ use thiserror::Error;
 use tokio::sync::Mutex;
 
 use crate::config::{PriceField, Symbol};
+use crate::util::http::{HyperliquidHttpTimeouts, hyperliquid_reqwest_client};
 use crate::util::rate_limiter::{FixedRateLimiter, RateLimiter};
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -165,13 +166,23 @@ pub trait HttpClient: Send + Sync {
 #[derive(Debug, Clone)]
 pub struct ReqwestHttpClient {
     client: reqwest::Client,
+    timeouts: HyperliquidHttpTimeouts,
 }
 
 impl ReqwestHttpClient {
     pub fn new() -> Self {
+        Self::with_timeouts(HyperliquidHttpTimeouts::from_env())
+    }
+
+    pub fn with_timeouts(timeouts: HyperliquidHttpTimeouts) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: hyperliquid_reqwest_client(timeouts),
+            timeouts,
         }
+    }
+
+    pub fn timeout_settings(&self) -> HyperliquidHttpTimeouts {
+        self.timeouts
     }
 }
 

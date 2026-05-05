@@ -19,6 +19,7 @@ use tokio::time::sleep;
 
 use crate::config::{OrderType, Symbol};
 use crate::state::PositionSnapshot;
+use crate::util::http::{HyperliquidHttpTimeouts, hyperliquid_reqwest_client};
 use crate::util::rate_limiter::{FixedRateLimiter, RateLimiter};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -211,14 +212,24 @@ pub trait OrderExecutor: Send + Sync {
 pub struct ReqwestOrderClient {
     client: reqwest::Client,
     api_key: Option<String>,
+    timeouts: HyperliquidHttpTimeouts,
 }
 
 impl ReqwestOrderClient {
     pub fn new(api_key: Option<String>) -> Self {
+        Self::with_timeouts(api_key, HyperliquidHttpTimeouts::from_env())
+    }
+
+    pub fn with_timeouts(api_key: Option<String>, timeouts: HyperliquidHttpTimeouts) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: hyperliquid_reqwest_client(timeouts),
             api_key,
+            timeouts,
         }
+    }
+
+    pub fn timeout_settings(&self) -> HyperliquidHttpTimeouts {
+        self.timeouts
     }
 }
 

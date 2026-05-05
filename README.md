@@ -38,6 +38,7 @@ Key behaviors:
 - `execution.leverage` is optional. If set, `updateLeverage` is sent before open orders.
 - `funding.modes = ["THRESHOLD"]` is now enforced in entry gating: effective entry threshold becomes `entry_z + k * normalized_funding_cost`.
 - `funding.funding_cost_threshold` is denominated in estimated quote-currency cost for the configured position size, not bps.
+- Hyperliquid HTTP clients use explicit timeouts to avoid stuck API calls: `HYPERLIQUID_TIMEOUT` controls total request timeout in seconds (default `10`), and `HYPERLIQUID_CONNECT_TIMEOUT` controls connection timeout in seconds (default `5`).
 - `[cost_gate]` can compute cost-aware entry diagnostics in shadow mode and, when `enforce = true`, block entries whose estimated net edge is below `min_net_edge_bps`.
 - `[regime_gate]` can enforce a rolling fixed-spread half-life filter before submitting live entries.
 - `[stale_cross]` is an optional guarded recovery path for missed crossing signals after a stop-loss cooldown releases; it only fires inside a short recovery window when z-score is still in the entry band and is reverting.

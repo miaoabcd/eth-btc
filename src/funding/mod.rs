@@ -9,6 +9,7 @@ use thiserror::Error;
 
 use crate::config::{FundingConfig, FundingMode, Symbol};
 use crate::core::TradeDirection;
+use crate::util::http::{HyperliquidHttpTimeouts, hyperliquid_reqwest_client};
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum FundingError {
@@ -62,13 +63,23 @@ pub trait FundingHttpClient: Send + Sync {
 #[derive(Clone)]
 pub struct ReqwestFundingClient {
     client: reqwest::Client,
+    timeouts: HyperliquidHttpTimeouts,
 }
 
 impl ReqwestFundingClient {
     pub fn new() -> Self {
+        Self::with_timeouts(HyperliquidHttpTimeouts::from_env())
+    }
+
+    pub fn with_timeouts(timeouts: HyperliquidHttpTimeouts) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: hyperliquid_reqwest_client(timeouts),
+            timeouts,
         }
+    }
+
+    pub fn timeout_settings(&self) -> HyperliquidHttpTimeouts {
+        self.timeouts
     }
 }
 
