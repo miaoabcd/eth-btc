@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 
-use crate::config::{RiskConfig, StaleCrossConfig, StrategyConfig};
+use crate::config::{PersistentExtremeConfig, RiskConfig, StaleCrossConfig, StrategyConfig};
 use crate::core::{EntrySignal, ExitReason, ExitSignal, TradeDirection};
 use crate::state::{PositionSnapshot, StrategyStatus};
 
@@ -10,6 +10,7 @@ pub struct EntrySignalDetector {
     entry_z: Decimal,
     sl_z: Decimal,
     stale_cross: StaleCrossConfig,
+    persistent_extreme: PersistentExtremeConfig,
     prev_z: Option<Decimal>,
     last_status: Option<StrategyStatus>,
     cooldown_recovery_age: Option<u32>,
@@ -21,10 +22,19 @@ impl EntrySignalDetector {
     }
 
     pub fn with_stale_cross(config: StrategyConfig, stale_cross: StaleCrossConfig) -> Self {
+        Self::with_entry_controls(config, stale_cross, PersistentExtremeConfig::default())
+    }
+
+    pub fn with_entry_controls(
+        config: StrategyConfig,
+        stale_cross: StaleCrossConfig,
+        persistent_extreme: PersistentExtremeConfig,
+    ) -> Self {
         Self {
             entry_z: config.entry_z,
             sl_z: config.sl_z,
             stale_cross,
+            persistent_extreme,
             prev_z: None,
             last_status: None,
             cooldown_recovery_age: None,
@@ -68,20 +78,40 @@ impl EntrySignalDetector {
             && next_recovery_age.is_some_and(|age| age <= self.stale_cross.max_age_bars)
             && (!self.stale_cross.require_reverting
                 || prev_z.is_some_and(|prev| abs_z <= prev.abs()));
+        let persistent_extreme = self.persistent_extreme.enabled
+            && !crossed_into_zone
+            && !stale_cross_recovery
+            && state == StrategyStatus::Flat
+            && abs_z >= self.persistent_extreme.min_abs_z
+            && abs_z < self.sl_z;
 
         self.prev_z = Some(zscore);
         self.last_status = Some(state);
         self.cooldown_recovery_age = next_recovery_age;
 
-        if state != StrategyStatus::Flat || (!crossed_into_zone && !stale_cross_recovery) {
+        if state != StrategyStatus::Flat
+            || (!crossed_into_zone && !stale_cross_recovery && !persistent_extreme)
+        {
             return None;
         }
 
-        let direction = if zscore >= self.entry_z {
+        let direction = if zscore >= Decimal::ZERO {
             TradeDirection::ShortEthLongBtc
         } else {
             TradeDirection::LongEthShortBtc
         };
+        if persistent_extreme
+            && match direction {
+                TradeDirection::LongEthShortBtc => {
+                    !self.persistent_extreme.allow_long_eth_short_btc
+                }
+                TradeDirection::ShortEthLongBtc => {
+                    !self.persistent_extreme.allow_short_eth_long_btc
+                }
+            }
+        {
+            return None;
+        }
         Some(EntrySignal { direction, zscore })
     }
 }

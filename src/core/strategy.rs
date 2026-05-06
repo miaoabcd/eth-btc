@@ -495,8 +495,9 @@ impl StrategyEngine {
                     }
                 }
             };
-            let capital = compute_capital(&self.config.position, equity)
+            let base_capital = compute_capital(&self.config.position, equity)
                 .map_err(|err| StrategyError::Position(err.to_string()))?;
+            let capital = base_capital * self.directional_size_multiplier(signal.direction);
             if let Some(max_notional) = self.config.position.max_notional
                 && capital > max_notional
             {
@@ -1216,6 +1217,17 @@ impl StrategyEngine {
             required_net_edge_bps,
             pass: estimated_net_edge_bps >= required_net_edge_bps,
         })
+    }
+
+    fn directional_size_multiplier(&self, direction: TradeDirection) -> Decimal {
+        match direction {
+            TradeDirection::LongEthShortBtc => {
+                self.config.directional_sizing.long_eth_short_btc_multiplier
+            }
+            TradeDirection::ShortEthLongBtc => {
+                self.config.directional_sizing.short_eth_long_btc_multiplier
+            }
+        }
     }
 
     fn exposure_to_position(

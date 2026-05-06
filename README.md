@@ -42,6 +42,8 @@ Key behaviors:
 - `[cost_gate]` can compute cost-aware entry diagnostics in shadow mode and, when `enforce = true`, block entries whose estimated net edge is below `min_net_edge_bps`.
 - `[regime_gate]` can enforce a rolling fixed-spread half-life filter before submitting live entries.
 - `[stale_cross]` is an optional guarded recovery path for missed crossing signals after a stop-loss cooldown releases; it only fires inside a short recovery window when z-score is still in the entry band and is reverting.
+- `[persistent_extreme]` can emit level-triggered entries when z-score is already beyond a configured threshold and no fresh crossing is available.
+- `[directional_sizing]` applies optional direction-level capital multipliers before order sizing.
 - `runtime.once = true` runs one cycle and exits (useful for cron scheduling).
 - `execution.order_type = "POST_ONLY"` enables passive maker-style entry orders. If both legs rest successfully, the strategy enters a local `PendingEntry` state and waits for the next reconciliation cycle to confirm the actual fill.
 - `POST_ONLY` is currently entry-only. Exits still use marketable orders so take-profit / stop-loss logic is not left resting on the book.
@@ -192,6 +194,28 @@ short_eth_long_btc_extra_bps = 2.0
 ```
 
 When enabled, stats logs include `expected_edge_bps`, `estimated_cost_bps`, `estimated_net_edge_bps`, `cost_gate_required_net_edge_bps`, and `cost_gate_pass`. Set `enforce = true` only after reviewing the shadow distribution.
+
+### Persistent Extreme Entries
+
+Use this only with explicit direction flags. It is intended for cases where the strategy is flat while z-score is already in an actionable extreme band, so the crossing detector has no new crossing event to emit:
+
+```toml
+[persistent_extreme]
+enabled = true
+min_abs_z = 1.4
+allow_long_eth_short_btc = false
+allow_short_eth_long_btc = true
+```
+
+### Directional Sizing
+
+Direction-level multipliers are applied to computed capital before funding, cost-gate, max-notional, and size conversion:
+
+```toml
+[directional_sizing]
+long_eth_short_btc_multiplier = 1.0
+short_eth_long_btc_multiplier = 1.25
+```
 
 ### Regime Gate
 

@@ -66,6 +66,77 @@ fn default_cost_gate_is_shadow_safe_and_disabled() {
 }
 
 #[test]
+fn default_persistent_extreme_is_disabled_and_direction_safe() {
+    let config = get_default_config();
+
+    assert!(!config.persistent_extreme.enabled);
+    assert_eq!(config.persistent_extreme.min_abs_z, dec!(1.5));
+    assert!(!config.persistent_extreme.allow_long_eth_short_btc);
+    assert!(!config.persistent_extreme.allow_short_eth_long_btc);
+}
+
+#[test]
+fn persistent_extreme_requires_positive_threshold_when_enabled() {
+    let mut config = get_default_config();
+    config.persistent_extreme.enabled = true;
+    config.persistent_extreme.min_abs_z = dec!(0);
+    config.persistent_extreme.allow_short_eth_long_btc = true;
+
+    let err = config
+        .validate()
+        .expect_err("expected persistent extreme validation failure");
+    assert!(matches!(
+        err,
+        eth_btc_strategy::config::ConfigError::InvalidValue { field, .. }
+        if field == "persistent_extreme.min_abs_z"
+    ));
+}
+
+#[test]
+fn persistent_extreme_requires_at_least_one_allowed_direction_when_enabled() {
+    let mut config = get_default_config();
+    config.persistent_extreme.enabled = true;
+
+    let err = config
+        .validate()
+        .expect_err("expected persistent extreme direction validation failure");
+    assert!(matches!(
+        err,
+        eth_btc_strategy::config::ConfigError::InvalidValue { field, .. }
+        if field == "persistent_extreme"
+    ));
+}
+
+#[test]
+fn default_directional_sizing_is_neutral() {
+    let config = get_default_config();
+
+    assert_eq!(
+        config.directional_sizing.long_eth_short_btc_multiplier,
+        dec!(1)
+    );
+    assert_eq!(
+        config.directional_sizing.short_eth_long_btc_multiplier,
+        dec!(1)
+    );
+}
+
+#[test]
+fn directional_sizing_multipliers_must_be_positive() {
+    let mut config = get_default_config();
+    config.directional_sizing.short_eth_long_btc_multiplier = dec!(0);
+
+    let err = config
+        .validate()
+        .expect_err("expected directional sizing validation failure");
+    assert!(matches!(
+        err,
+        eth_btc_strategy::config::ConfigError::InvalidValue { field, .. }
+        if field == "directional_sizing.short_eth_long_btc_multiplier"
+    ));
+}
+
+#[test]
 fn default_regime_gate_is_disabled_but_has_live_candidate_parameters() {
     let config = get_default_config();
 

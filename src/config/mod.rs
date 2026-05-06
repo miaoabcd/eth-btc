@@ -288,6 +288,25 @@ impl Default for StaleCrossConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PersistentExtremeConfig {
+    pub enabled: bool,
+    pub min_abs_z: Decimal,
+    pub allow_long_eth_short_btc: bool,
+    pub allow_short_eth_long_btc: bool,
+}
+
+impl Default for PersistentExtremeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            min_abs_z: Decimal::new(15, 1),
+            allow_long_eth_short_btc: false,
+            allow_short_eth_long_btc: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SigmaFloorConfig {
     pub mode: SigmaFloorMode,
     pub sigma_floor_const: Decimal,
@@ -331,6 +350,21 @@ impl Default for PositionConfig {
             n_vol: 672,
             max_position_groups: 1,
             min_size_policy: MinSizePolicy::Skip,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DirectionalSizingConfig {
+    pub long_eth_short_btc_multiplier: Decimal,
+    pub short_eth_long_btc_multiplier: Decimal,
+}
+
+impl Default for DirectionalSizingConfig {
+    fn default() -> Self {
+        Self {
+            long_eth_short_btc_multiplier: Decimal::ONE,
+            short_eth_long_btc_multiplier: Decimal::ONE,
         }
     }
 }
@@ -566,8 +600,10 @@ impl Default for InstrumentConstraints {
 pub struct Config {
     pub strategy: StrategyConfig,
     pub stale_cross: StaleCrossConfig,
+    pub persistent_extreme: PersistentExtremeConfig,
     pub sigma_floor: SigmaFloorConfig,
     pub position: PositionConfig,
+    pub directional_sizing: DirectionalSizingConfig,
     pub funding: FundingConfig,
     pub cost_gate: CostGateConfig,
     pub regime_gate: RegimeGateConfig,
@@ -591,8 +627,10 @@ impl Default for Config {
         Self {
             strategy: StrategyConfig::default(),
             stale_cross: StaleCrossConfig::default(),
+            persistent_extreme: PersistentExtremeConfig::default(),
             sigma_floor: SigmaFloorConfig::default(),
             position: PositionConfig::default(),
+            directional_sizing: DirectionalSizingConfig::default(),
             funding: FundingConfig::default(),
             cost_gate: CostGateConfig::default(),
             regime_gate: RegimeGateConfig::default(),
@@ -634,6 +672,29 @@ impl Config {
                 field: "stale_cross.max_age_bars",
                 message: "must be > 0 when stale_cross is enabled".to_string(),
             });
+        }
+        if self.persistent_extreme.enabled {
+            if self.persistent_extreme.min_abs_z <= Decimal::ZERO {
+                return Err(ConfigError::InvalidValue {
+                    field: "persistent_extreme.min_abs_z",
+                    message: "must be > 0 when persistent_extreme is enabled".to_string(),
+                });
+            }
+            if self.persistent_extreme.min_abs_z >= self.strategy.sl_z {
+                return Err(ConfigError::InvalidValue {
+                    field: "persistent_extreme.min_abs_z",
+                    message: "must be < strategy.sl_z when persistent_extreme is enabled"
+                        .to_string(),
+                });
+            }
+            if !self.persistent_extreme.allow_long_eth_short_btc
+                && !self.persistent_extreme.allow_short_eth_long_btc
+            {
+                return Err(ConfigError::InvalidValue {
+                    field: "persistent_extreme",
+                    message: "at least one direction must be allowed when enabled".to_string(),
+                });
+            }
         }
         if self.sigma_floor.sigma_floor_const <= Decimal::ZERO {
             return Err(ConfigError::InvalidValue {
@@ -696,6 +757,18 @@ impl Config {
             return Err(ConfigError::InvalidValue {
                 field: "position.max_position_groups",
                 message: "must be >= 1".to_string(),
+            });
+        }
+        if self.directional_sizing.long_eth_short_btc_multiplier <= Decimal::ZERO {
+            return Err(ConfigError::InvalidValue {
+                field: "directional_sizing.long_eth_short_btc_multiplier",
+                message: "must be > 0".to_string(),
+            });
+        }
+        if self.directional_sizing.short_eth_long_btc_multiplier <= Decimal::ZERO {
+            return Err(ConfigError::InvalidValue {
+                field: "directional_sizing.short_eth_long_btc_multiplier",
+                message: "must be > 0".to_string(),
             });
         }
         if let Some(value) = self.funding.c_min_ratio
@@ -859,6 +932,18 @@ impl Config {
         if let Some(value) = overrides.stale_cross.require_reverting {
             self.stale_cross.require_reverting = value;
         }
+        if let Some(value) = overrides.persistent_extreme.enabled {
+            self.persistent_extreme.enabled = value;
+        }
+        if let Some(value) = overrides.persistent_extreme.min_abs_z {
+            self.persistent_extreme.min_abs_z = value;
+        }
+        if let Some(value) = overrides.persistent_extreme.allow_long_eth_short_btc {
+            self.persistent_extreme.allow_long_eth_short_btc = value;
+        }
+        if let Some(value) = overrides.persistent_extreme.allow_short_eth_long_btc {
+            self.persistent_extreme.allow_short_eth_long_btc = value;
+        }
         if let Some(value) = overrides.sigma_floor.mode {
             self.sigma_floor.mode = value;
         }
@@ -897,6 +982,12 @@ impl Config {
         }
         if let Some(value) = overrides.position.min_size_policy {
             self.position.min_size_policy = value;
+        }
+        if let Some(value) = overrides.directional_sizing.long_eth_short_btc_multiplier {
+            self.directional_sizing.long_eth_short_btc_multiplier = value;
+        }
+        if let Some(value) = overrides.directional_sizing.short_eth_long_btc_multiplier {
+            self.directional_sizing.short_eth_long_btc_multiplier = value;
         }
         if let Some(value) = overrides.funding.modes {
             self.funding.modes = value;
@@ -1094,9 +1185,13 @@ pub struct ConfigOverrides {
     #[serde(default)]
     pub stale_cross: StaleCrossOverrides,
     #[serde(default)]
+    pub persistent_extreme: PersistentExtremeOverrides,
+    #[serde(default)]
     pub sigma_floor: SigmaFloorOverrides,
     #[serde(default)]
     pub position: PositionOverrides,
+    #[serde(default)]
+    pub directional_sizing: DirectionalSizingOverrides,
     #[serde(default)]
     pub funding: FundingOverrides,
     #[serde(default)]
@@ -1138,6 +1233,14 @@ pub struct StaleCrossOverrides {
 }
 
 #[derive(Debug, Default, Deserialize)]
+pub struct PersistentExtremeOverrides {
+    pub enabled: Option<bool>,
+    pub min_abs_z: Option<Decimal>,
+    pub allow_long_eth_short_btc: Option<bool>,
+    pub allow_short_eth_long_btc: Option<bool>,
+}
+
+#[derive(Debug, Default, Deserialize)]
 pub struct SigmaFloorOverrides {
     pub mode: Option<SigmaFloorMode>,
     pub sigma_floor_const: Option<Decimal>,
@@ -1156,6 +1259,12 @@ pub struct PositionOverrides {
     pub n_vol: Option<usize>,
     pub max_position_groups: Option<u32>,
     pub min_size_policy: Option<MinSizePolicy>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct DirectionalSizingOverrides {
+    pub long_eth_short_btc_multiplier: Option<Decimal>,
+    pub short_eth_long_btc_multiplier: Option<Decimal>,
 }
 
 #[derive(Debug, Default, Deserialize)]

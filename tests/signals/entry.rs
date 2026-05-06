@@ -1,6 +1,6 @@
 use rust_decimal_macros::dec;
 
-use eth_btc_strategy::config::{StaleCrossConfig, StrategyConfig};
+use eth_btc_strategy::config::{PersistentExtremeConfig, StaleCrossConfig, StrategyConfig};
 use eth_btc_strategy::core::TradeDirection;
 use eth_btc_strategy::signals::EntrySignalDetector;
 use eth_btc_strategy::state::StrategyStatus;
@@ -132,6 +132,48 @@ fn stale_cross_signal_expires_after_cooldown_recovery_window() {
             .is_none()
     );
     let signal = detector.update(Some(dec!(1.7)), StrategyStatus::Flat);
+
+    assert!(signal.is_none());
+}
+
+#[test]
+fn persistent_extreme_signal_can_enter_without_new_crossing() {
+    let config = StrategyConfig::default();
+    let persistent = PersistentExtremeConfig {
+        enabled: true,
+        min_abs_z: dec!(1.4),
+        allow_long_eth_short_btc: false,
+        allow_short_eth_long_btc: true,
+    };
+    let mut detector =
+        EntrySignalDetector::with_entry_controls(config, StaleCrossConfig::default(), persistent);
+
+    assert!(
+        detector
+            .update(Some(dec!(1.6)), StrategyStatus::InPosition)
+            .is_none()
+    );
+
+    let signal = detector
+        .update(Some(dec!(1.7)), StrategyStatus::Flat)
+        .expect("expected persistent positive extreme entry");
+    assert_eq!(signal.direction, TradeDirection::ShortEthLongBtc);
+}
+
+#[test]
+fn persistent_extreme_signal_respects_direction_flags() {
+    let config = StrategyConfig::default();
+    let persistent = PersistentExtremeConfig {
+        enabled: true,
+        min_abs_z: dec!(1.4),
+        allow_long_eth_short_btc: false,
+        allow_short_eth_long_btc: true,
+    };
+    let mut detector =
+        EntrySignalDetector::with_entry_controls(config, StaleCrossConfig::default(), persistent);
+
+    detector.update(Some(dec!(-1.6)), StrategyStatus::InPosition);
+    let signal = detector.update(Some(dec!(-1.7)), StrategyStatus::Flat);
 
     assert!(signal.is_none());
 }

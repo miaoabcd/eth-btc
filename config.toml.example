@@ -19,6 +19,13 @@ enabled = false
 max_age_bars = 4
 require_reverting = true
 
+[persistent_extreme]
+# level-triggered entry for already-extreme z-scores when no fresh crossing is emitted
+enabled = false
+min_abs_z = 1.5
+allow_long_eth_short_btc = false
+allow_short_eth_long_btc = false
+
 [sigma_floor]
 # mode: CONST | QUANTILE | EWMA_MIX
 mode = "CONST"
@@ -48,6 +55,11 @@ n_vol = 672
 max_position_groups = 1
 # minimum size policy: SKIP | ADJUST
 min_size_policy = "SKIP"
+
+[directional_sizing]
+# optional direction-level capital multipliers applied before order sizing
+long_eth_short_btc_multiplier = 1.0
+short_eth_long_btc_multiplier = 1.0
 
 [funding]
 # modes: FILTER | THRESHOLD | SIZE (can combine)

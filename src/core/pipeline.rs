@@ -34,9 +34,10 @@ impl SignalPipeline {
         Ok(Self {
             zcalc,
             volcalc,
-            entry_detector: EntrySignalDetector::with_stale_cross(
+            entry_detector: EntrySignalDetector::with_entry_controls(
                 config.strategy.clone(),
                 config.stale_cross.clone(),
+                config.persistent_extreme.clone(),
             ),
             exit_detector: ExitSignalDetector::new(config.strategy.clone(), config.risk.clone()),
         })

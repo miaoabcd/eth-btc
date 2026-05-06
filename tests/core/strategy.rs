@@ -6,8 +6,8 @@ use eth_btc_strategy::config::{CapitalMode, Config, FundingMode, OrderType, Symb
 use eth_btc_strategy::core::TradeDirection;
 use eth_btc_strategy::core::strategy::StrategyEngine;
 use eth_btc_strategy::execution::{
-    ExecutionEngine, ExecutionError, OrderExecutor, OrderFill, OrderRequest, OrderSubmitResult,
-    PaperOrderExecutor, RetryConfig,
+    ExecutionEngine, ExecutionError, OrderExecutor, OrderFill, OrderRequest, OrderSide,
+    OrderSubmitResult, PaperOrderExecutor, RetryConfig,
 };
 use eth_btc_strategy::funding::{FundingRate, estimate_funding_cost};
 use eth_btc_strategy::logging::{EntryBlockReason, LogEvent, PnlSource, TradeEvent, TradeLog};
@@ -736,6 +736,256 @@ async fn strategy_engine_applies_direction_specific_cost_buffer() {
     );
     assert_eq!(outcome.bar_log.cost_gate_pass, Some(false));
     assert!(recorder.submitted.lock().expect("submit lock").is_empty());
+}
+
+#[tokio::test]
+async fn strategy_engine_enters_short_on_persistent_positive_extreme_without_crossing() {
+    let mut config = Config::default();
+    config.strategy.n_z = 3;
+    config.position.n_vol = 1;
+    config.strategy.entry_z = dec!(0.5);
+    config.strategy.sl_z = dec!(10.0);
+    config.position.c_value = Some(dec!(100));
+    config.persistent_extreme.enabled = true;
+    config.persistent_extreme.min_abs_z = dec!(0.5);
+    config.persistent_extreme.allow_short_eth_long_btc = true;
+    config.persistent_extreme.allow_long_eth_short_btc = false;
+
+    let recorder = std::sync::Arc::new(RecordingExecutor::default());
+    let execution = ExecutionEngine::new(recorder.clone(), RetryConfig::fast());
+    let mut engine = StrategyEngine::new(config, execution).unwrap();
+
+    for offset in [0, 900, 1800] {
+        engine
+            .process_bar(eth_btc_strategy::core::strategy::StrategyBar {
+                timestamp: Utc.timestamp_opt(offset, 0).unwrap(),
+                eth_price: dec!(100),
+                btc_price: dec!(100),
+                equity: None,
+                funding_eth: None,
+                funding_btc: None,
+                funding_interval_hours: None,
+            })
+            .await
+            .unwrap();
+    }
+
+    engine
+        .apply_state(StrategyState {
+            status: StrategyStatus::InPosition,
+            position: Some(PositionSnapshot {
+                direction: TradeDirection::LongEthShortBtc,
+                entry_time: Utc.timestamp_opt(0, 0).unwrap(),
+                eth: PositionLeg {
+                    qty: dec!(1),
+                    avg_price: dec!(100),
+                    notional: dec!(100),
+                },
+                btc: PositionLeg {
+                    qty: dec!(-1),
+                    avg_price: dec!(100),
+                    notional: dec!(100),
+                },
+            }),
+            pending_entry: None,
+            cooldown_until: None,
+            cumulative_realized_pnl: dec!(0),
+        })
+        .unwrap();
+    engine
+        .process_bar(eth_btc_strategy::core::strategy::StrategyBar {
+            timestamp: Utc.timestamp_opt(2700, 0).unwrap(),
+            eth_price: dec!(271.8281828),
+            btc_price: dec!(100),
+            equity: None,
+            funding_eth: None,
+            funding_btc: None,
+            funding_interval_hours: None,
+        })
+        .await
+        .unwrap();
+
+    engine
+        .apply_state(StrategyState {
+            status: StrategyStatus::Flat,
+            position: None,
+            pending_entry: None,
+            cooldown_until: None,
+            cumulative_realized_pnl: dec!(0),
+        })
+        .unwrap();
+    let outcome = engine
+        .process_bar(eth_btc_strategy::core::strategy::StrategyBar {
+            timestamp: Utc.timestamp_opt(3600, 0).unwrap(),
+            eth_price: dec!(271.8281828),
+            btc_price: dec!(100),
+            equity: None,
+            funding_eth: None,
+            funding_btc: None,
+            funding_interval_hours: None,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.state, StrategyStatus::InPosition);
+    assert!(outcome.events.contains(&LogEvent::Entry));
+    let submitted = recorder.submitted.lock().expect("submit lock");
+    assert_eq!(submitted.len(), 2);
+    assert!(
+        submitted
+            .iter()
+            .any(|order| { order.symbol == Symbol::EthPerp && order.side == OrderSide::Sell })
+    );
+    assert!(
+        submitted
+            .iter()
+            .any(|order| { order.symbol == Symbol::BtcPerp && order.side == OrderSide::Buy })
+    );
+}
+
+#[tokio::test]
+async fn strategy_engine_does_not_enter_long_on_disabled_persistent_negative_extreme() {
+    let mut config = Config::default();
+    config.strategy.n_z = 3;
+    config.position.n_vol = 1;
+    config.strategy.entry_z = dec!(0.5);
+    config.strategy.sl_z = dec!(10.0);
+    config.position.c_value = Some(dec!(100));
+    config.persistent_extreme.enabled = true;
+    config.persistent_extreme.min_abs_z = dec!(0.5);
+    config.persistent_extreme.allow_short_eth_long_btc = true;
+    config.persistent_extreme.allow_long_eth_short_btc = false;
+
+    let recorder = std::sync::Arc::new(RecordingExecutor::default());
+    let execution = ExecutionEngine::new(recorder.clone(), RetryConfig::fast());
+    let mut engine = StrategyEngine::new(config, execution).unwrap();
+
+    for offset in [0, 900, 1800] {
+        engine
+            .process_bar(eth_btc_strategy::core::strategy::StrategyBar {
+                timestamp: Utc.timestamp_opt(offset, 0).unwrap(),
+                eth_price: dec!(100),
+                btc_price: dec!(100),
+                equity: None,
+                funding_eth: None,
+                funding_btc: None,
+                funding_interval_hours: None,
+            })
+            .await
+            .unwrap();
+    }
+
+    engine
+        .apply_state(StrategyState {
+            status: StrategyStatus::InPosition,
+            position: Some(PositionSnapshot {
+                direction: TradeDirection::LongEthShortBtc,
+                entry_time: Utc.timestamp_opt(0, 0).unwrap(),
+                eth: PositionLeg {
+                    qty: dec!(1),
+                    avg_price: dec!(100),
+                    notional: dec!(100),
+                },
+                btc: PositionLeg {
+                    qty: dec!(-1),
+                    avg_price: dec!(100),
+                    notional: dec!(100),
+                },
+            }),
+            pending_entry: None,
+            cooldown_until: None,
+            cumulative_realized_pnl: dec!(0),
+        })
+        .unwrap();
+    engine
+        .process_bar(eth_btc_strategy::core::strategy::StrategyBar {
+            timestamp: Utc.timestamp_opt(2700, 0).unwrap(),
+            eth_price: dec!(36.78794412),
+            btc_price: dec!(100),
+            equity: None,
+            funding_eth: None,
+            funding_btc: None,
+            funding_interval_hours: None,
+        })
+        .await
+        .unwrap();
+
+    engine
+        .apply_state(StrategyState {
+            status: StrategyStatus::Flat,
+            position: None,
+            pending_entry: None,
+            cooldown_until: None,
+            cumulative_realized_pnl: dec!(0),
+        })
+        .unwrap();
+    let outcome = engine
+        .process_bar(eth_btc_strategy::core::strategy::StrategyBar {
+            timestamp: Utc.timestamp_opt(3600, 0).unwrap(),
+            eth_price: dec!(36.78794412),
+            btc_price: dec!(100),
+            equity: None,
+            funding_eth: None,
+            funding_btc: None,
+            funding_interval_hours: None,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.state, StrategyStatus::Flat);
+    assert_eq!(
+        outcome.bar_log.entry_block_reason,
+        Some(EntryBlockReason::NoCross)
+    );
+    assert!(recorder.submitted.lock().expect("submit lock").is_empty());
+}
+
+#[tokio::test]
+async fn strategy_engine_applies_short_directional_size_multiplier_before_ordering() {
+    let mut config = Config::default();
+    config.strategy.n_z = 3;
+    config.position.n_vol = 1;
+    config.strategy.entry_z = dec!(0.5);
+    config.strategy.sl_z = dec!(10.0);
+    config.position.c_value = Some(dec!(100));
+    config.directional_sizing.short_eth_long_btc_multiplier = dec!(1.25);
+
+    let recorder = std::sync::Arc::new(RecordingExecutor::default());
+    let execution = ExecutionEngine::new(recorder.clone(), RetryConfig::fast());
+    let mut engine = StrategyEngine::new(config, execution).unwrap();
+
+    for offset in [0, 900, 1800] {
+        engine
+            .process_bar(eth_btc_strategy::core::strategy::StrategyBar {
+                timestamp: Utc.timestamp_opt(offset, 0).unwrap(),
+                eth_price: dec!(100),
+                btc_price: dec!(100),
+                equity: None,
+                funding_eth: None,
+                funding_btc: None,
+                funding_interval_hours: None,
+            })
+            .await
+            .unwrap();
+    }
+
+    let outcome = engine
+        .process_bar(eth_btc_strategy::core::strategy::StrategyBar {
+            timestamp: Utc.timestamp_opt(2700, 0).unwrap(),
+            eth_price: dec!(271.8281828),
+            btc_price: dec!(100),
+            equity: None,
+            funding_eth: None,
+            funding_btc: None,
+            funding_interval_hours: None,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.state, StrategyStatus::InPosition);
+    assert_eq!(outcome.bar_log.notional_eth, Some(dec!(62.5)));
+    assert_eq!(outcome.bar_log.notional_btc, Some(dec!(62.5)));
+    assert_eq!(recorder.submitted.lock().expect("submit lock").len(), 2);
 }
 
 #[tokio::test]
